@@ -33,6 +33,19 @@ import {
   encodeSyncCheckReq,
   encodeSyncMissingReq,
 } from '../sdk/sync';
+import {
+  decodeCallAnswer,
+  decodeCallInviteRes,
+  decodeRoomTokenRes,
+  encodeCallAnswerReq,
+  encodeCallCancelReq,
+  encodeCallHangupReq,
+  encodeCallInviteReq,
+  encodeParticipantStateReq,
+  encodeRoomTokenReq,
+  type CallAnswerPush,
+} from '../sdk/rtc';
+import { callSession } from './call';
 import { IMHttp } from '../sdk/rest';
 import {
   GROUP_OP,
@@ -105,6 +118,9 @@ export interface ImState {
   status: AppStatus;
   authError: string;
   connection: ConnectionState;
+  call: CallStatus;
+  /** last RTC failure, kept for diagnostics */
+  lastCallError: string;
   me: Me | null;
   endpoint: string;
   tab: Tab;
@@ -133,6 +149,8 @@ const initialState: ImState = {
   status: 'idle',
   authError: '',
   connection: 'idle',
+  call: emptyCall(),
+  lastCallError: '',
   me: null,
   endpoint: localStorage.getItem(ENDPOINT_KEY) ?? '',
   tab: 'conversations',
@@ -199,6 +217,29 @@ const dedupeMessages = (items: UiMessage[]): UiMessage[] => {
   }
   return order.map((key) => seen.get(key) as UiMessage);
 };
+
+/** RTC call phase shown by the call overlay. */
+export type CallPhase = 'idle' | 'incoming' | 'outgoing' | 'connecting' | 'active';
+
+export interface CallStatus {
+  phase: CallPhase;
+  callId: string;
+  media: 1 | 2;
+  peerId: string;
+  peerName: string;
+  room: string;
+  startedAt: number;
+  muted: boolean;
+  videoOn: boolean;
+  error: string;
+}
+
+function emptyCall(): CallStatus {
+  return {
+    phase: 'idle', callId: '', media: 1, peerId: '', peerName: '', room: '',
+    startedAt: 0, muted: false, videoOn: true, error: '',
+  };
+}
 
 const emptyThread = (): Thread => ({
   items: [],
@@ -1393,6 +1434,20 @@ class ImStore {
   // ------------------------------------------------------------------ push --
 
   private async handlePush(event: PushEvent): Promise<void> {
+    if (import.meta.env.DEV && event.opcode !== OP.PUSH_MSG) console.debug(`[zim] push opcode=${event.opcode} len=${event.payload.length}`);
+    if (event.opcode === OP.CALL_ANSWER) {
+      this.handleCallPush(event.payload);
+      return;
+    }
+    if (event.opcode === OP.CALL_HANGUP || event.opcode === OP.CALL_CANCEL) {
+      // The peer hung up or cancelled: close the sheet on this side too.
+      if (import.meta.env.DEV) console.debug(`[zim] remote end opcode=${event.opcode}`);
+      if (this.state.call.phase !== 'idle') {
+        this.notify(event.opcode === OP.CALL_CANCEL ? '对方已取消' : '对方已挂断');
+        void this.endCall('remote');
+      }
+      return;
+    }
     if (event.opcode !== OP.PUSH_MSG) return;
 
     let item: MessageItem;
@@ -1471,6 +1526,227 @@ class ImStore {
     } else if (String(item.send_id) !== String(this.state.me?.uid ?? '')) {
       this.patchConversation(cid, { unread: Number(this.conversation(cid)?.unread ?? 0) + 1 });
     }
+  }
+
+  // ------------------------------------------------------------------ call --
+
+  /** Server pushed an RTC state change (1802 with seq=0). */
+  private handleCallPush(payload: Uint8Array): void {
+    let update: CallAnswerPush;
+    try {
+      update = decodeCallAnswer(payload);
+    } catch {
+      return;
+    }
+    if (!update.call_id) return;
+    switch (update.phase) {
+      case 1:
+        // Ringing: the callee shows the incoming call sheet.
+        this.set({
+          call: {
+            phase: 'incoming',
+            callId: update.call_id,
+            media: update.media === 2 ? 2 : 1,
+            peerId: update.from_uid,
+            peerName: update.from_nickname || `用户 ${update.from_uid}`,
+            room: update.room,
+            startedAt: 0,
+            muted: false,
+            videoOn: update.media === 2,
+            error: '',
+          },
+        });
+        break;
+      case 2:
+        // Answered by the peer (caller side) or auto-answered (family).
+        if (this.state.call.callId !== update.call_id) return;
+        if (this.state.call.phase === 'outgoing' || this.state.call.phase === 'connecting') {
+          this.set({
+            call: { ...this.state.call, phase: 'active', room: update.room || this.state.call.room, startedAt: Date.now() },
+          });
+        }
+        break;
+      case 3:
+        this.notify('对方忙线中', 'error');
+        void this.endCall('busy');
+        break;
+      default:
+        break;
+    }
+  }
+
+  /** Starts an outgoing call in the active direct conversation. */
+  async startCall(media: 1 | 2): Promise<void> {
+    const conversation = this.conversation(this.state.activeCid);
+    if (!conversation || conversation.type !== 1 || !this.client) {
+      this.notify('只能在单聊里发起通话', 'error');
+      return;
+    }
+    if (this.state.call.phase !== 'idle') return;
+    const callId = crypto.randomUUID();
+    const peerId = String(conversation.peer_id);
+    const peer = this.friendProfile(peerId);
+    this.set({
+      call: {
+        phase: 'outgoing',
+        callId,
+        media,
+        peerId,
+        peerName: peer,
+        room: '',
+        startedAt: 0,
+        muted: false,
+        videoOn: media === 2,
+        error: '',
+      },
+    });
+
+    try {
+      const res = await this.client.request(
+        OP.CALL_INVITE,
+        encodeCallInviteReq({ callId, targetType: 1, targetId: peerId, media }),
+        decodeCallInviteRes,
+      );
+      this.set({ call: { ...this.state.call, room: res.payload.room } });
+      await this.joinCallRoom(callId, media === 2);
+    } catch (err) {
+      this.notify(`呼叫失败：${wrapError(err).display}`, 'error');
+      await this.endCall('error');
+    }
+  }
+
+  /** Accepts the ringing call and joins the SFU room. */
+  async acceptCall(): Promise<void> {
+    const call = this.state.call;
+    if (call.phase !== 'incoming' || !this.client) return;
+    this.set({ call: { ...call, phase: 'connecting' } });
+    try {
+      await this.client.request(OP.CALL_ANSWER, encodeCallAnswerReq({ callId: call.callId, accept: true }), decodeCallAnswer);
+      if (import.meta.env.DEV) console.debug('[zim] call answered, fetching room token');
+      await this.joinCallRoom(call.callId, call.media === 2);
+      this.set({ call: { ...this.state.call, phase: 'active', startedAt: Date.now() } });
+    } catch (err) {
+      this.notify(`接听失败：${wrapError(err).display}`, 'error');
+      await this.endCall('error');
+    }
+  }
+
+  /** Rejects the ringing call. */
+  async rejectCall(): Promise<void> {
+    const call = this.state.call;
+    if (call.phase !== 'incoming' || !this.client) return;
+    try {
+      await this.client.request(OP.CALL_ANSWER, encodeCallAnswerReq({ callId: call.callId, accept: false }), decodeCallAnswer);
+    } catch {
+      // the sheet closes either way
+    }
+    await this.endCall('rejected');
+  }
+
+  /** Caller cancels while ringing. */
+  async cancelCall(): Promise<void> {
+    const call = this.state.call;
+    if (import.meta.env.DEV) console.debug(`[zim] call cancel requested phase=${call.phase}`);
+    if (!this.client || call.phase !== 'outgoing') return;
+    try {
+      await this.client.request(OP.CALL_CANCEL, encodeCallCancelReq({ callId: call.callId, reason: 6 }), decodeOperationRes);
+    } catch {
+      // ignore
+    }
+    await this.endCall('cancelled');
+  }
+
+  /** Hangs up an active call (or cancels a ringing one). */
+  async hangupCall(): Promise<void> {
+    const call = this.state.call;
+    if (import.meta.env.DEV) console.debug(`[zim] call hangup requested phase=${call.phase}`);
+    if (call.phase === 'incoming') {
+      await this.rejectCall();
+      return;
+    }
+    if (call.phase === 'outgoing') {
+      await this.cancelCall();
+      return;
+    }
+    if (!this.client || (call.phase !== 'active' && call.phase !== 'connecting')) return;
+    const duration = call.startedAt > 0 ? Math.round((Date.now() - call.startedAt) / 1000) : 0;
+    try {
+      await this.client.request(
+        OP.CALL_HANGUP,
+        encodeCallHangupReq({ callId: call.callId, reason: 1, duration }),
+        decodeOperationRes,
+      );
+    } catch {
+      // local teardown still runs
+    }
+    await this.endCall('hangup');
+  }
+
+  /** Toggles the microphone and reports participant state (1807). */
+  async toggleMute(): Promise<void> {
+    const call = this.state.call;
+    if (!call.callId) return;
+    const muted = !call.muted;
+    this.set({ call: { ...call, muted } });
+    await callSession.setMicrophone(!muted).catch(() => undefined);
+    void this.reportParticipantState();
+  }
+
+  /** Toggles the camera for video calls. */
+  async toggleCamera(): Promise<void> {
+    const call = this.state.call;
+    if (!call.callId) return;
+    const videoOn = !call.videoOn;
+    this.set({ call: { ...call, videoOn } });
+    await callSession.setCamera(videoOn).catch(() => undefined);
+    void this.reportParticipantState();
+  }
+
+  private async reportParticipantState(): Promise<void> {
+    const call = this.state.call;
+    if (!this.client || !call.callId || !this.state.me) return;
+    await this.client
+      .request(
+        OP.CALL_STATE,
+        encodeParticipantStateReq({
+          callId: call.callId,
+          uid: this.state.me.uid,
+          muted: call.muted,
+          videoOn: call.videoOn,
+        }),
+        decodeOperationRes,
+      )
+      .catch(() => undefined);
+  }
+
+  /** Fetches a room token and connects the media session. */
+  private async joinCallRoom(callId: string, video: boolean): Promise<void> {
+    if (!this.client) return;
+    const res = await this.client.request(
+      OP.ROOM_TOKEN,
+      encodeRoomTokenReq({ callId }),
+      decodeRoomTokenRes,
+    );
+    const { token, sfu_url: sfuUrl } = res.payload;
+    if (import.meta.env.DEV) console.debug(`[zim] call room token ok sfu=${sfuUrl} token=${token ? 'yes' : 'no'}`);
+    if (!token || !sfuUrl) throw new Error('SFU 未就绪');
+    await callSession.connect(sfuUrl, token, video);
+    if (import.meta.env.DEV) console.debug('[zim] call media connected');
+  }
+
+  private async endCall(_reason: string): Promise<void> {
+    await callSession.end().catch(() => undefined);
+    this.set({
+      call: {
+        phase: 'idle', callId: '', media: 1, peerId: '', peerName: '', room: '',
+        startedAt: 0, muted: false, videoOn: true, error: '',
+      },
+    });
+  }
+
+  private friendProfile(uid: string): string {
+    const friend = this.state.friends.find((item) => String(item.friend_id) === uid);
+    return friend?.remark || friend?.profile?.nickname || friend?.profile?.username || `用户 ${uid}`;
   }
 
   private handleKick(reason: number): void {

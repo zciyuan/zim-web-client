@@ -378,6 +378,26 @@ export function ChatPanel() {
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
+          {!isGroup ? (
+            <>
+              <button
+                type="button"
+                aria-label="语音通话"
+                onClick={() => void imStore.startCall(1)}
+                className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+              >
+                语音
+              </button>
+              <button
+                type="button"
+                aria-label="视频通话"
+                onClick={() => void imStore.startCall(2)}
+                className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+              >
+                视频
+              </button>
+            </>
+          ) : null}
           <button
             type="button"
             onClick={() => setSearchOpen((open) => !open)}

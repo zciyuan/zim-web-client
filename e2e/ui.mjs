@@ -34,6 +34,10 @@ const launchChrome = async () => {
     '--no-default-browser-check',
     '--disable-gpu',
     '--lang=zh-CN',
+    // Fake mic/camera so the RTC flow can be exercised headlessly.
+    '--use-fake-device-for-media-stream',
+    '--use-fake-ui-for-media-stream',
+    '--autoplay-policy=no-user-gesture-required',
     'about:blank',
   ], { stdio: 'ignore', windowsHide: true });
 
@@ -444,6 +448,57 @@ const main = async () => {
   const syncResult = await alice.evaluate(async () => window.__zim.runSync());
   assert.equal(syncResult.full, false, 'sync should be incremental after login');
   await alice.screenshot({ path: path.join(OUT, '16-sync.png') });
+  step('voice call connects and records a call message');
+  await alice.bringToFront();
+  const callPhase = async (page) => page.evaluate(() => window.__zim.getSnapshot().call.phase);
+  const waitCallPhase = async (page, phases, timeout = 25_000) => {
+    const end = Date.now() + timeout;
+    while (Date.now() < end) {
+      const phase = await callPhase(page);
+      if (phases.includes(phase)) return phase;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    return callPhase(page);
+  };
+
+  // The call sheet only exists for direct conversations: switch back to Bob.
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '语音');
+    if (!button) throw new Error('voice call button missing');
+    button.click();
+  });  assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'caller should be in outgoing');
+  assert.equal(await waitCallPhase(bob, ['incoming']), 'incoming', 'callee should ring');
+
+  await bob.bringToFront();
+  await bob.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
+      .find((item) => item.textContent === '接听');
+    if (!button) throw new Error('accept button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'callee should reach active');
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'caller should reach active');
+  await alice.screenshot({ path: path.join(OUT, '17-call.png') });
+
+  await alice.bringToFront();
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
+      .find((item) => item.textContent === '挂断');
+    if (!button) throw new Error('hangup button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'caller should hang up');
+  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'callee sheet should close');
+  await alice.waitForFunction(
+    () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes('语音通话')),
+    { timeout: 20_000 },
+  );
+
   step('PWA manifest is served');
   const manifest = await alice.evaluate(async () => {
     const response = await fetch('/manifest.webmanifest');

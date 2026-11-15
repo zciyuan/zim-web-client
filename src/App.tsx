@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 
+import { CallOverlay } from './components/CallOverlay';
 import { LoginView } from './components/LoginView';
 import { Toast } from './components/Toast';
 import { Workspace } from './components/Workspace';
@@ -23,6 +24,7 @@ export default function App() {
   return (
     <>
       {ready ? <Workspace /> : <LoginView />}
+      <CallOverlay />
       <Toast />
     </>
   );
