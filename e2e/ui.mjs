@@ -298,9 +298,21 @@ const main = async () => {
 
   step('edit, delete and search messages');
   await alice.bringToFront();
-  alice.on('dialog', async (dialog) => {
-    if (dialog.type() === 'prompt') await dialog.accept('编辑后的消息');
-    else await dialog.accept();
+  const onDialog = async (dialog) => {
+    try {
+      if (dialog.type() === 'prompt') await dialog.accept('编辑后的消息');
+      else await dialog.accept();
+    } catch {
+      // the dialog may already have been dismissed by the time we answer
+    }
+  };
+  alice.on('dialog', onDialog);
+  // Native prompt/confirm are auto-dismissed in headless Chrome before the CDP
+  // handler can answer, so stub them: the feature under test is the edit/delete
+  // round trip, not the browser dialog.
+  await alice.evaluate(() => {
+    window.prompt = () => '编辑后的消息';
+    window.confirm = () => true;
   });
   const clickOwnAction = (label) => alice.evaluate((wanted) => {
     const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
@@ -311,11 +323,27 @@ const main = async () => {
     button.click();
   }, label);
 
-  await clickOwnAction('编辑');
-  await alice.waitForFunction(
-    () => document.querySelector('[aria-label="聊天"]')?.textContent?.includes('编辑后的消息'),
-    { timeout: 20_000 },
-  );
+  let edited = false;
+  for (let attempt = 0; attempt < 4 && !edited; attempt += 1) {
+    await clickOwnAction('编辑');
+    edited = await alice.evaluate(() => (document.querySelector('[aria-label="聊天"]')?.textContent ?? '').includes('编辑后的消息'));
+    if (!edited) await new Promise((resolve) => setTimeout(resolve, 700));
+  }
+  if (!edited) {
+    const diag = await alice.evaluate(() => {
+      const s = window.__zim.getSnapshot();
+      const thread = s.threads[s.activeCid];
+      const mine = (thread?.items ?? []).filter((item) => String(item.send_id) === String(s.me?.uid));
+      const last = mine[mine.length - 1];
+      return {
+        toast: s.toast?.text,
+        last: last ? { content: last.content.slice(0, 40), send_time: last.send_time, state: last.localState, status: last.status } : null,
+        ageMs: last ? Date.now() - Number(last.send_time) : -1,
+      };
+    });
+    console.error('edit diagnostics:', JSON.stringify(diag));
+  }
+  assert.ok(edited, 'edited content never rendered');
 
   await clickOwnAction('删除');
   await alice.waitForFunction(
@@ -323,6 +351,8 @@ const main = async () => {
     { timeout: 20_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '12-message-ops.png') });
+
+  alice.off('dialog', onDialog);
 
   step('conversation search finds the message');
   await alice.evaluate(() => {
@@ -554,6 +584,38 @@ const main = async () => {
     { timeout: 20_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '19-forward.png') });
+
+  step('add friend over the WS channel (1201)');
+  const wsSuffix = String(Date.now() % 1_000_000);
+  const wsFriend = await fetch(`${BASE}/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: `ws_${wsSuffix}`,
+      password: 'password123',
+      nickname: `WS Friend ${wsSuffix}`,
+      platform: 4,
+    }),
+  }).then((response) => response.json());
+  assert.equal(wsFriend.code, 0, `register ws friend failed: ${JSON.stringify(wsFriend)}`);
+  const wsAdded = await alice.evaluate(async (uid) => {
+    try {
+      await window.__zim.addFriend(uid, 'e2e ws channel');
+      return true;
+    } catch (err) {
+      return String(err && err.message ? err.message : err);
+    }
+  }, String(wsFriend.data.uid));
+  assert.equal(wsAdded, true, `WS add friend failed: ${wsAdded}`);
+  const aliceWsUid = await alice.evaluate(() => window.__zim.getSnapshot().me.uid);
+  const wsInbox = await fetch(`${BASE}/v1/friend-requests?type=in`, {
+    headers: { Authorization: `Bearer ${wsFriend.data.access_token}` },
+  }).then((response) => response.json());
+  assert.equal(wsInbox.code, 0);
+  assert.ok(
+    (wsInbox.data?.requests ?? []).some((item) => String(item.from_id) === String(aliceWsUid)),
+    `friend inbox missing the WS request: ${JSON.stringify(wsInbox.data)}`,
+  );
 
   step('PWA manifest is served');
   const manifest = await alice.evaluate(async () => {

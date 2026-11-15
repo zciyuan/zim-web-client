@@ -49,6 +49,13 @@ import {
   type CallAnswerPush,
 } from '../sdk/rtc';
 import { callSession } from './call';
+import {
+  decodeRelationOperationRes,
+  encodeAddBlackReq,
+  encodeAddFriendReq,
+  encodeAnswerFriendReq,
+  encodeDeleteFriendReq,
+} from '../sdk/relation';
 import { IMHttp } from '../sdk/rest';
 import {
   GROUP_OP,
@@ -642,6 +649,18 @@ class ImStore {
 
   // ------------------------------------------------------------ relation ----
 
+  /** Runs a friend write over WS; false means "fall back to REST". */
+  private async friendViaWs(opcode: number, payload: Uint8Array): Promise<boolean> {
+    if (!this.client || this.state.connection !== 'open') return false;
+    try {
+      await this.client.request(opcode, payload, decodeRelationOperationRes);
+      return true;
+    } catch (err) {
+      if (import.meta.env.DEV) console.debug('[zim] friend ws failed, falling back to REST', err);
+      return false;
+    }
+  }
+
   /** Reloads friends, pending requests and the blacklist together. */
   private async refreshRelations(): Promise<void> {
     const [friends, requests, blacklist] = await Promise.allSettled([
@@ -676,7 +695,9 @@ class ImStore {
 
   async addFriend(uid: string, why = ''): Promise<void> {
     try {
-      await this.rest.addFriend(uid, why);
+      if (!(await this.friendViaWs(OP.ADD_FRIEND, encodeAddFriendReq({ friendId: uid, why })))) {
+        await this.rest.addFriend(uid, why);
+      }
       await this.refreshRelations();
       this.notify('好友申请已发送');
     } catch (err) {
@@ -687,7 +708,9 @@ class ImStore {
 
   async answerFriend(uid: string, accept: boolean): Promise<void> {
     try {
-      await this.rest.answerFriend(uid, accept);
+      if (!(await this.friendViaWs(OP.ANSWER_FRIEND, encodeAnswerFriendReq({ friendId: uid, accept })))) {
+        await this.rest.answerFriend(uid, accept);
+      }
       await this.refreshRelations();
       this.notify(accept ? '已添加好友' : '已拒绝');
     } catch (err) {
@@ -698,7 +721,9 @@ class ImStore {
 
   async deleteFriend(uid: string): Promise<void> {
     try {
-      await this.rest.deleteFriend(uid);
+      if (!(await this.friendViaWs(OP.DELETE_FRIEND, encodeDeleteFriendReq({ friendId: uid })))) {
+        await this.rest.deleteFriend(uid);
+      }
       await this.refreshRelations();
       await this.refreshConversations();
       this.notify('好友已删除');
@@ -732,7 +757,9 @@ class ImStore {
 
   async blockUser(uid: string): Promise<void> {
     try {
-      await this.rest.addBlack(uid);
+      if (!(await this.friendViaWs(OP.ADD_BLACK, encodeAddBlackReq({ uid })))) {
+        await this.rest.addBlack(uid);
+      }
       await this.refreshRelations();
       this.notify('已加入黑名单');
     } catch (err) {
@@ -743,7 +770,9 @@ class ImStore {
 
   async unblockUser(uid: string): Promise<void> {
     try {
-      await this.rest.removeBlack(uid);
+      if (!(await this.friendViaWs(OP.ADD_BLACK, encodeAddBlackReq({ uid, remove: true })))) {
+        await this.rest.removeBlack(uid);
+      }
       await this.refreshRelations();
       this.notify('已移出黑名单');
     } catch (err) {
