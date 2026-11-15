@@ -45,7 +45,7 @@ import {
   type GroupMemberInfo,
   type GroupSummary,
 } from '../sdk/groups';
-import type { Conversation, Friend, Group, GroupMember, MessageItem, UserProfile } from '../sdk/types';
+import type { Conversation, Friend, FriendRequestItem, Group, GroupMember, MessageItem, UserProfile } from '../sdk/types';
 
 const SESSION_KEY = 'zim.session';
 const DEVICE_KEY = 'zim.device';
@@ -88,6 +88,10 @@ export interface ImState {
   tab: Tab;
   conversations: Conversation[];
   friends: Friend[];
+  friendRequests: FriendRequestItem[];
+  /** profiles of request senders, for display names */
+  requestProfiles: Record<string, UserProfile>;
+  blacklist: UserProfile[];
   groups: Group[];
   activeCid: string | null;
   threads: Record<string, Thread>;
@@ -112,6 +116,9 @@ const initialState: ImState = {
   tab: 'conversations',
   conversations: [],
   friends: [],
+  friendRequests: [],
+  requestProfiles: {},
+  blacklist: [],
   groups: [],
   activeCid: null,
   threads: {},
@@ -356,7 +363,7 @@ class ImStore {
       deviceId: deviceId(),
       deviceName: '浏览器',
       onState: (connection, detail) => {
-        if (import.meta.env.DEV) console.debug('[zim] conn', connection, detail ?? '');
+        if (import.meta.env.DEV) console.debug(`[zim] conn ${connection} ${detail?.code ?? ''} ${detail?.reason ?? ''}`);
         this.set({ connection: connection === 'reconnected' ? 'open' : connection });
         if (connection === 'offline') this.notify('连接已断开，自动重连已放弃，请刷新页面', 'error');
       },
@@ -417,8 +424,10 @@ class ImStore {
       this.rest.friends(),
       this.rest.conversations(),
       this.rest.groups(),
+      this.rest.friendRequests('in'),
+      this.rest.blacklist(),
     ]);
-    const [me, friends, conversations, groups] = results;
+    const [me, friends, conversations, groups, requests, blacklist] = results;
 
     const patch: Partial<ImState> = {};
     if (me.status === 'fulfilled') {
@@ -435,6 +444,8 @@ class ImStore {
       patch.conversations = conversations.value.map((item) => normalizeConversation(item, selfUid));
     }
     if (groups.status === 'fulfilled') patch.groups = groups.value;
+    if (requests.status === 'fulfilled') patch.friendRequests = requests.value as FriendRequestItem[];
+    if (blacklist.status === 'fulfilled') patch.blacklist = blacklist.value as UserProfile[];
     this.set(patch);
 
     // Exact snowflake group ids come from the wire protocol, not from REST JSON.
@@ -537,6 +548,118 @@ class ImStore {
   /** Pending join requests (owner/admin only; empty for members). */
   groupApplies(gid: string): Promise<unknown[]> {
     return this.rest.groupApplies(gid);
+  }
+
+  // ------------------------------------------------------------ relation ----
+
+  /** Reloads friends, pending requests and the blacklist together. */
+  private async refreshRelations(): Promise<void> {
+    const [friends, requests, blacklist] = await Promise.allSettled([
+      this.rest.friends(),
+      this.rest.friendRequests('in'),
+      this.rest.blacklist(),
+    ]);
+    const patch: Partial<ImState> = {};
+    if (friends.status === 'fulfilled') patch.friends = friends.value;
+    if (requests.status === 'fulfilled') patch.friendRequests = requests.value as FriendRequestItem[];
+    if (blacklist.status === 'fulfilled') patch.blacklist = blacklist.value as UserProfile[];
+    this.set(patch);
+
+    const incoming = (patch.friendRequests ?? this.state.friendRequests)
+      .map((item) => String(item.from_id))
+      .filter(Boolean);
+    if (incoming.length > 0) {
+      try {
+        const profiles = await this.rest.users(incoming);
+        this.set({
+          requestProfiles: Object.fromEntries(profiles.map((profile) => [String(profile.uid), profile])),
+        });
+      } catch {
+        // names fall back to the uid
+      }
+    }
+  }
+
+  searchUsers(keyword: string): Promise<UserProfile[]> {
+    return this.rest.searchUsers(keyword);
+  }
+
+  async addFriend(uid: string, why = ''): Promise<void> {
+    try {
+      await this.rest.addFriend(uid, why);
+      await this.refreshRelations();
+      this.notify('好友申请已发送');
+    } catch (err) {
+      this.notify(`添加好友失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  async answerFriend(uid: string, accept: boolean): Promise<void> {
+    try {
+      await this.rest.answerFriend(uid, accept);
+      await this.refreshRelations();
+      this.notify(accept ? '已添加好友' : '已拒绝');
+    } catch (err) {
+      this.notify(`处理申请失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  async deleteFriend(uid: string): Promise<void> {
+    try {
+      await this.rest.deleteFriend(uid);
+      await this.refreshRelations();
+      await this.refreshConversations();
+      this.notify('好友已删除');
+    } catch (err) {
+      this.notify(`删除好友失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  async setFriendRemark(uid: string, remark: string): Promise<void> {
+    try {
+      await this.rest.updateRemark(uid, remark);
+      await this.refreshRelations();
+      this.notify('备注已保存');
+    } catch (err) {
+      this.notify(`保存备注失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  async pinFriend(uid: string, pinned: boolean): Promise<void> {
+    try {
+      await this.rest.pinFriend(uid, pinned);
+      await this.refreshRelations();
+      this.notify(pinned ? '已置顶' : '已取消置顶');
+    } catch (err) {
+      this.notify(`操作失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  async blockUser(uid: string): Promise<void> {
+    try {
+      await this.rest.addBlack(uid);
+      await this.refreshRelations();
+      this.notify('已加入黑名单');
+    } catch (err) {
+      this.notify(`拉黑失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  async unblockUser(uid: string): Promise<void> {
+    try {
+      await this.rest.removeBlack(uid);
+      await this.refreshRelations();
+      this.notify('已移出黑名单');
+    } catch (err) {
+      this.notify(`操作失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
   }
 
   // ------------------------------------------------------------- group ops --

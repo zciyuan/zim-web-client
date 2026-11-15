@@ -217,13 +217,51 @@ export class IMHttp {
     return this.send<{ friends: Friend[] }>('GET', '/v1/friends').then((data) => data.friends ?? []);
   }
 
-  friendRequests(): Promise<unknown[]> {
-    return this.send<{ requests: unknown[] }>('GET', '/v1/friend-requests')
+  addFriend(friendId: string, why = ''): Promise<void> {
+    return this.send<{ ok: boolean }>('POST', '/v1/friends', { body: { friend_id: Number(friendId), why } })
+      .then(() => undefined);
+  }
+
+  answerFriend(friendId: string, accept: boolean): Promise<void> {
+    return this.send<{ ok: boolean }>('POST', '/v1/friend-requests/answer', {
+      body: { friend_id: Number(friendId), accept },
+    }).then(() => undefined);
+  }
+
+  deleteFriend(friendId: string): Promise<void> {
+    return this.send<{ ok: boolean }>('DELETE', `/v1/friends/${encodeURIComponent(friendId)}`)
+      .then(() => undefined);
+  }
+
+  updateRemark(friendId: string, remark: string): Promise<void> {
+    return this.send<{ ok: boolean }>('PUT', `/v1/friends/${encodeURIComponent(friendId)}/remark`, {
+      body: { remark },
+    }).then(() => undefined);
+  }
+
+  pinFriend(friendId: string, pinned: boolean): Promise<void> {
+    return this.send<{ ok: boolean }>('POST', `/v1/friends/${encodeURIComponent(friendId)}/pin`, {
+      body: { pinned },
+    }).then(() => undefined);
+  }
+
+  friendRequests(type: 'in' | 'out' = 'in'): Promise<unknown[]> {
+    return this.send<{ requests: unknown[] }>('GET', '/v1/friend-requests', { params: { type } })
       .then((data) => data.requests ?? []);
   }
 
   blacklist(): Promise<UserProfile[]> {
     return this.send<{ users: UserProfile[] }>('GET', '/v1/blacklist').then((data) => data.users ?? []);
+  }
+
+  addBlack(uid: string): Promise<void> {
+    return this.send<{ ok: boolean }>('POST', '/v1/blacklist', { body: { uid: Number(uid) } })
+      .then(() => undefined);
+  }
+
+  removeBlack(uid: string): Promise<void> {
+    return this.send<{ ok: boolean }>('DELETE', `/v1/blacklist/${encodeURIComponent(uid)}`)
+      .then(() => undefined);
   }
 
   // --------------------------------------------------------- conversations --

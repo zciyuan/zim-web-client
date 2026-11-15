@@ -350,6 +350,48 @@ const main = async () => {
   );
   await fresh.screenshot({ path: path.join(OUT, '08-register.png') });
 
+  step('friend request arrives and is accepted');
+  const aliceUid = await alice.evaluate(() => window.__zim.getSnapshot().me.uid);
+  const friendSuffix = String(Date.now() % 1_000_000);
+  const friendReg = await fetch(`${BASE}/v1/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      username: `friend_${friendSuffix}`,
+      password: 'password123',
+      nickname: `Friend ${friendSuffix}`,
+      platform: 4,
+    }),
+  }).then((response) => response.json());
+  assert.equal(friendReg.code, 0, `register friend failed: ${JSON.stringify(friendReg)}`);
+  const friendName = `Friend ${friendSuffix}`;
+  const requestResult = await fetch(`${BASE}/v1/friends`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${friendReg.data.access_token}` },
+    body: JSON.stringify({ friend_id: Number(aliceUid), why: 'e2e hello' }),
+  }).then((response) => response.json());
+  assert.equal(requestResult.code, 0, `send request failed: ${JSON.stringify(requestResult)}`);
+
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(2)');
+  await alice.evaluate(async () => {
+    await window.__zim.refresh();
+  });
+  await alice.waitForFunction(
+    () => document.querySelector('[aria-label="列表"]')?.textContent?.includes('好友申请'),
+    { timeout: 20_000 },
+  );
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="列表"] button')].find((item) => item.textContent === '同意');
+    if (!button) throw new Error('accept button missing');
+    button.click();
+  });
+  await alice.waitForFunction(
+    (needle) => document.querySelector('[aria-label="列表"]')?.textContent?.includes(needle),
+    { timeout: 20_000 },
+    friendName,
+  );
+  await alice.screenshot({ path: path.join(OUT, '11-friends.png') });
+
   const bubbles = await alice.$$eval('[aria-label="聊天"] .message-enter', (nodes) => nodes.length);
   assert.ok(bubbles > 0, 'alice should render message bubbles');
   assert.deepEqual(errors, [], `browser errors: ${errors.join(' | ')}`);

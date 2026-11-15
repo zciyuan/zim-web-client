@@ -89,6 +89,16 @@ export interface Friend {
   profile?: UserProfile;
 }
 
+/** Friend request row (inbound or outbound). */
+export interface FriendRequestItem {
+  id?: string;
+  from_id: string;
+  to_id: string;
+  why?: string;
+  status?: number;
+  created_at?: number;
+}
+
 export interface Group {
   group_id: string;
   name?: string;
