@@ -1,0 +1,12 @@
+[package]
+name = "zim"
+version = "0.1.0"
+description = "ZIM desktop shell (Tauri 2) wrapping the same web build"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }

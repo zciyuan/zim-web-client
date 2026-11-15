@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Runtime artifacts (screenshots, logs)
+_output/
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Tauri / Capacitor native build output
+src-tauri/target/
+src-tauri/gen/
+android/
+ios/
