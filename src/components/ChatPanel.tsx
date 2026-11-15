@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardE
 import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
-import { imStore, useIm, type UiMessage } from '../app/store';
+import { errorText, imStore, useIm, type UiMessage } from '../app/store';
 import { formatClock, imageOf, messageText } from '../app/format';
 
 function Bubble({
@@ -20,14 +20,31 @@ function Bubble({
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const { text, system } = messageText(message.content, message.msg_type);
   const state = message.localState ?? 'sent';
+  const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
+    && message.status !== 1 && message.status !== 2;
 
   const openImage = () => {
     if (image) window.open(imStore.assetUrl(image.url), '_blank', 'noopener');
   };
 
+  const startEdit = () => {
+    const next = window.prompt('编辑消息', text);
+    if (next !== null && next.trim() !== '') {
+      void imStore.editMessage(message, JSON.stringify({ text: next.trim() }));
+    }
+  };
+
+  const startDelete = () => {
+    if (window.confirm('删除这条消息？双方都会看到「已删除」')) void imStore.deleteMessage(message);
+  };
+
+  const startRecall = () => {
+    if (window.confirm('撤回这条消息？')) void imStore.recallMessage(message);
+  };
+
   return (
     <div
-      className={`message-enter flex max-w-[82%] gap-2 ${mine ? 'flex-row-reverse self-end' : 'self-start'}`}
+      className={`message-enter group flex max-w-[82%] gap-2 ${mine ? 'flex-row-reverse self-end' : 'self-start'}`}
       data-state={state}
     >
       <Avatar name={senderName} seed={message.send_id} size={30} />
@@ -81,6 +98,24 @@ function Bubble({
             </button>
           </div>
         ) : null}
+        <div className={`mt-0.5 hidden items-center gap-2 text-[11px] text-slate-400 group-hover:flex ${mine ? 'justify-end' : ''}`}>
+          {canManage && message.msg_type === 1 ? (
+            <button type="button" className="hover:text-indigo-600" onClick={startEdit}>编辑</button>
+          ) : null}
+          {canManage ? (
+            <button type="button" className="hover:text-rose-600" onClick={startDelete}>删除</button>
+          ) : null}
+          {canManage ? (
+            <button type="button" className="hover:text-amber-600" onClick={startRecall}>撤回</button>
+          ) : null}
+          <button
+            type="button"
+            className="hover:text-indigo-600"
+            onClick={() => void navigator.clipboard?.writeText(text)}
+          >
+            复制
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -202,6 +237,10 @@ function Composer({ disabled }: { disabled: boolean }) {
 export function ChatPanel() {
   const state = useIm();
   const [membersOpen, setMembersOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [keyword, setKeyword] = useState('');
+  const [results, setResults] = useState<UiMessage[] | null>(null);
+  const [searching, setSearching] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const conversation = useMemo(
@@ -210,6 +249,19 @@ export function ChatPanel() {
   );
   const thread = state.activeCid ? state.threads[state.activeCid] : undefined;
   const isGroup = conversation?.type === 2;
+
+  const runSearch = async () => {
+    if (!conversation || !keyword.trim()) return;
+    setSearching(true);
+    try {
+      setResults(await imStore.searchMessages(conversation.conversation_id, keyword.trim()));
+    } catch (err) {
+      imStore.notify(errorText(err), 'error');
+      setResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -245,16 +297,70 @@ export function ChatPanel() {
             <p className="truncate text-[11px] text-slate-500">{subtitle}</p>
           </div>
         </div>
-        {isGroup ? (
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            onClick={() => setMembersOpen(true)}
-            className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+            onClick={() => setSearchOpen((open) => !open)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
           >
-            群设置
+            搜索
           </button>
-        ) : null}
+          {isGroup ? (
+            <button
+              type="button"
+              onClick={() => setMembersOpen(true)}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+            >
+              群设置
+            </button>
+          ) : null}
+        </div>
       </header>
+
+      {searchOpen ? (
+        <div className="border-b border-slate-200 bg-white px-4 py-2 dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex gap-1.5">
+            <input
+              value={keyword}
+              onChange={(event) => setKeyword(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void runSearch();
+                }
+              }}
+              placeholder="搜索本会话消息，回车执行"
+              className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-800"
+            />
+            <button
+              type="button"
+              disabled={searching || !keyword.trim()}
+              onClick={() => void runSearch()}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs dark:border-slate-700 disabled:opacity-50"
+            >
+              {searching ? '搜索中…' : '搜索'}
+            </button>
+          </div>
+          {results !== null ? (
+            <div className="mt-2 max-h-[180px] overflow-y-auto" data-search-results>
+              {results.length === 0 ? <p className="py-3 text-center text-xs text-slate-500">没有匹配的消息</p> : null}
+              {results.map((item) => (
+                <button
+                  key={item.server_msg_id || item.client_msg_id}
+                  type="button"
+                  onClick={() => setSearchOpen(false)}
+                  className="flex w-full items-baseline gap-2 rounded-lg px-2 py-1 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                >
+                  <span className="shrink-0 text-slate-400">{formatClock(item.send_time)}</span>
+                  <span className="min-w-0 flex-1 truncate text-slate-700 dark:text-slate-200">
+                    {messageText(item.content, item.msg_type).text}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div ref={scrollRef} className="flex flex-1 flex-col overflow-y-auto px-4 py-4">
         <div className="mt-auto flex flex-col gap-2.5">

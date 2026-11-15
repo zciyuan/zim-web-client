@@ -13,10 +13,15 @@ import {
   OP,
   decodeMessageItem,
   decodeMyGroupsRes,
+  decodeSearchMessageRes,
   decodeOperationRes,
   decodeReadReceiptRes,
   decodeSendRes,
+  encodeDeleteMessageReq,
+  encodeEditMessageReq,
   encodeMyGroupsReq,
+  encodeRecallReq,
+  encodeSearchMessageReq,
   encodeReadReceiptReq,
   encodeSendGroupReq,
   encodeSendSingleReq,
@@ -1066,6 +1071,68 @@ class ImStore {
     });
   }
 
+  // -------------------------------------------------------- message ops ----
+
+  /** 1506: recall one of my messages (server enforces the window). */
+  async recallMessage(message: UiMessage): Promise<void> {
+    const conversation = this.conversation(message.conversation_id);
+    if (!conversation || !this.client) return;
+    try {
+      await this.client.request(OP.RECALL, encodeRecallReq({
+        conversationId: conversation.conversation_id,
+        serverMsgId: message.server_msg_id,
+      }), decodeOperationRes);
+      this.updateMessage(conversation.conversation_id, message.client_msg_id, { status: 1 });
+      this.notify('已撤回');
+    } catch (err) {
+      this.notify(`撤回失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** 1507: edit my own message; content is the JSON text payload. */
+  async editMessage(message: UiMessage, content: string): Promise<void> {
+    const conversation = this.conversation(message.conversation_id);
+    if (!conversation || !this.client) return;
+    try {
+      await this.client.request(OP.EDIT, encodeEditMessageReq({
+        conversationId: conversation.conversation_id,
+        serverMsgId: message.server_msg_id,
+        content,
+      }), decodeOperationRes);
+      this.updateMessage(conversation.conversation_id, message.client_msg_id, { content });
+      this.notify('已保存');
+    } catch (err) {
+      this.notify(`编辑失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** 1508: delete my own message for both sides. */
+  async deleteMessage(message: UiMessage): Promise<void> {
+    const conversation = this.conversation(message.conversation_id);
+    if (!conversation || !this.client) return;
+    try {
+      await this.client.request(OP.DELETE, encodeDeleteMessageReq({
+        conversationId: conversation.conversation_id,
+        serverMsgId: message.server_msg_id,
+      }), decodeOperationRes);
+      this.updateMessage(conversation.conversation_id, message.client_msg_id, { status: 2 });
+      this.notify('已删除');
+    } catch (err) {
+      this.notify(`删除失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** 1512: keyword search inside one conversation (newest first). */
+  async searchMessages(cid: string, keyword: string): Promise<UiMessage[]> {
+    if (!this.client) return [];
+    const res = await this.client.request(
+      OP.SEARCH,
+      encodeSearchMessageReq({ conversationId: cid, keyword, limit: 30 }),
+      decodeSearchMessageRes,
+    );
+    return res.payload.map((item) => ({ ...item, localState: 'sent' as const }));
+  }
+
   // ------------------------------------------------------------------ push --
 
   private async handlePush(event: PushEvent): Promise<void> {
@@ -1115,6 +1182,20 @@ class ImStore {
     }
 
     const thread = this.state.threads[cid];
+    // An edit/delete push reuses 1901 with an existing server_msg_id: replace
+    // the bubble in place instead of appending a duplicate.
+    if (item.server_msg_id && thread) {
+      const existing = thread.items.find((entry) => entry.server_msg_id === item.server_msg_id);
+      if (existing) {
+        this.updateMessage(cid, existing.client_msg_id, {
+          content: item.content,
+          status: item.status,
+          send_time: item.send_time,
+        });
+        this.patchConversation(cid, { last_msg_brief: item.content });
+        return;
+      }
+    }
     if (thread && !thread.loading) {
       this.appendToThread(cid, { ...item, localState: 'sent' });
     } else if (!thread || thread.loading) {

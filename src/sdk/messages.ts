@@ -21,7 +21,10 @@ export const OP = {
   SEND_GROUP: 1502,
   READ_RECEIPT: 1505,
   RECALL: 1506,
+  EDIT: 1507,
+  DELETE: 1508,
   PULL_BY_SEQ: 1511,
+  SEARCH: 1512,
   PUSH_MSG: 1901,
   PUSH_KICK: 1902,
 } as const;
@@ -264,6 +267,47 @@ export const decodeReadReceiptRes = (bytes: Uint8Array): { read_seq: string } =>
     else reader.skip(wire);
   });
   return { read_seq: readSeq };
+};
+
+/** 1506 Recall { string conversation_id=1; string server_msg_id=2; } */
+export const encodeRecallReq = (req: { conversationId: string; serverMsgId: string }): Uint8Array =>
+  new Writer().string(1, req.conversationId).string(2, req.serverMsgId).finish();
+
+/** 1507 EditMessage { conversation_id=1; server_msg_id=2; content=3; } */
+export const encodeEditMessageReq = (req: {
+  conversationId: string;
+  serverMsgId: string;
+  content: string;
+}): Uint8Array =>
+  new Writer()
+    .string(1, req.conversationId)
+    .string(2, req.serverMsgId)
+    .string(3, req.content)
+    .finish();
+
+/** 1508 DeleteMessage { conversation_id=1; server_msg_id=2; } */
+export const encodeDeleteMessageReq = (req: { conversationId: string; serverMsgId: string }): Uint8Array =>
+  new Writer().string(1, req.conversationId).string(2, req.serverMsgId).finish();
+
+/** 1512 SearchMessage { conversation_id=1; keyword=2; limit=3; } */
+export const encodeSearchMessageReq = (req: {
+  conversationId: string;
+  keyword: string;
+  limit?: number;
+}): Uint8Array =>
+  new Writer()
+    .string(1, req.conversationId)
+    .string(2, req.keyword)
+    .int32(3, req.limit ?? 30)
+    .finish();
+
+export const decodeSearchMessageRes = (bytes: Uint8Array): MessageItem[] => {
+  const items: MessageItem[] = [];
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) items.push(decodeMessageItem(reader.bytes()));
+    else reader.skip(wire);
+  });
+  return items;
 };
 
 /** 1314 MyGroups: empty request, `repeated string group_ids` response.

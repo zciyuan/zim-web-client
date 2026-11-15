@@ -228,11 +228,64 @@ const main = async () => {
     await setValue(alice, 'textarea', '收到，来自 React 客户端');
     await alice.focus('textarea');
     await alice.keyboard.press('Enter');
-    replied = await waitForText(alice, '收到，来自 React 客户端', 6000);
+    replied = await alice.evaluate((needle) => {
+      const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+        .filter((node) => node.classList.contains('out'));
+      const last = nodes[nodes.length - 1];
+      return Boolean(last && last.textContent?.includes(needle) && last.getAttribute('data-state') === 'sent');
+    }, '收到，来自 React 客户端');
+    if (!replied) await new Promise((resolve) => setTimeout(resolve, 800));
   }
-  assert.ok(replied, 'alice reply never rendered');
+  assert.ok(replied, 'alice reply never settled to sent');
 
-  step('emoji picker inserts an emoji and sends it');
+  step('edit, delete and search messages');
+  alice.on('dialog', async (dialog) => {
+    if (dialog.type() === 'prompt') await dialog.accept('编辑后的消息');
+    else await dialog.accept();
+  });
+  const clickOwnAction = (label) => alice.evaluate((wanted) => {
+    const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.classList.contains('out'));
+    const last = nodes[nodes.length - 1];
+    const button = last && [...last.querySelectorAll('button')].find((item) => item.textContent === wanted);
+    if (!button) throw new Error(`message action ${wanted} missing`);
+    button.click();
+  }, label);
+
+  await clickOwnAction('编辑');
+  await alice.waitForFunction(
+    () => document.querySelector('[aria-label="聊天"]')?.textContent?.includes('编辑后的消息'),
+    { timeout: 20_000 },
+  );
+
+  await clickOwnAction('删除');
+  await alice.waitForFunction(
+    () => document.querySelector('[aria-label="聊天"]')?.textContent?.includes('该消息已删除'),
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '12-message-ops.png') });
+
+  step('conversation search finds the message');
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')].find((item) => item.textContent === '搜索');
+    if (!button) throw new Error('search button missing');
+    button.click();
+  });
+  await alice.waitForSelector('[aria-label="聊天"] input', { timeout: 10_000 });
+  await setValue(alice, '[aria-label="聊天"] input', 'React 实时消息');
+  await alice.focus('[aria-label="聊天"] input');
+  await alice.keyboard.press('Enter');
+  await alice.waitForFunction(
+    () => document.querySelector('[aria-label="聊天"]')?.textContent?.includes('没有匹配的消息') === false
+      && document.querySelectorAll('[aria-label="聊天"] .truncate').length > 0,
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '13-search.png') });
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')].find((item) => item.textContent === '搜索');
+    if (button) button.click();
+  });
+
   await jsClick(alice, '[aria-label="表情"]');
   await alice.waitForSelector('[role="dialog"][aria-label="表情"]', { timeout: 5_000 });
   await jsClick(alice, '[aria-label="😀"]');
