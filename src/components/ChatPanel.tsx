@@ -4,7 +4,7 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
-import { attachmentOf, formatBytes, formatDuration } from '../app/format';
+import { attachmentOf, formatBytes, formatDuration, quoteOf } from '../app/format';
 import { formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
@@ -14,15 +14,18 @@ function Bubble({
   mine,
   showSender,
   senderName,
+  onForward,
 }: {
   message: UiMessage;
   mine: boolean;
   showSender: boolean;
   senderName: string;
+  onForward?: (message: UiMessage) => void;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
   const { text, system } = messageText(message.content, message.msg_type);
+  const quote = quoteOf(message.content);
   const state = message.localState ?? 'sent';
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
@@ -138,6 +141,11 @@ function Bubble({
             </button>
           </div>
         ) : null}
+        {quote ? (
+          <div className="mb-1 rounded-lg border-l-2 border-indigo-400 bg-slate-100 px-2 py-1 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            <span className="line-clamp-2">{quote.text}</span>
+          </div>
+        ) : null}
         <div className={`mt-0.5 hidden items-center gap-2 text-[11px] text-slate-400 group-hover:flex ${mine ? 'justify-end' : ''}`}>
           {canManage && message.msg_type === 1 ? (
             <button type="button" className="hover:text-indigo-600" onClick={startEdit}>编辑</button>
@@ -154,6 +162,12 @@ function Bubble({
             onClick={() => void navigator.clipboard?.writeText(text)}
           >
             复制
+          </button>
+          <button type="button" className="hover:text-indigo-600" onClick={() => imStore.setQuoteTarget(message)}>
+            引用
+          </button>
+          <button type="button" className="hover:text-indigo-600" onClick={() => onForward?.(message)}>
+            转发
           </button>
           <span className="flex items-center gap-1">
             {REACTION_EMOJIS.map((emoji) => (
@@ -193,6 +207,8 @@ function Bubble({
 }
 
 function Composer({ disabled }: { disabled: boolean }) {
+  const state = useIm();
+  const quote = state.quoteTarget;
   const [value, setValue] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -287,6 +303,17 @@ function Composer({ disabled }: { disabled: boolean }) {
         />
       </div>
 
+      {quote ? (
+        <div className="mx-2 mb-1 flex items-start gap-2 rounded-lg border-l-2 border-indigo-400 bg-slate-100 px-2 py-1 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+          <span className="line-clamp-2 flex-1" data-quote-preview>
+            引用：{messageText(quote.content, quote.msg_type).text}
+          </span>
+          <button type="button" aria-label="取消引用" className="shrink-0" onClick={() => imStore.setQuoteTarget(null)}>
+            ×
+          </button>
+        </div>
+      ) : null}
+
       <textarea
         ref={inputRef}
         value={value}
@@ -321,6 +348,7 @@ export function ChatPanel() {
   const [keyword, setKeyword] = useState('');
   const [results, setResults] = useState<UiMessage[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [forwardTarget, setForwardTarget] = useState<UiMessage | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const conversation = useMemo(
@@ -490,6 +518,7 @@ export function ChatPanel() {
                 mine={mine}
                 showSender={Boolean(isGroup)}
                 senderName={imStore.senderName(message.send_id)}
+                onForward={setForwardTarget}
               />
             );
           })}
@@ -503,6 +532,44 @@ export function ChatPanel() {
         gid={String(conversation.group_id)}
         onClose={() => setMembersOpen(false)}
       />
+
+      <dialog
+        open={Boolean(forwardTarget)}
+        onClose={() => setForwardTarget(null)}
+        className="w-[min(420px,94vw)] rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+      >
+        <header className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
+          <h3 className="text-sm font-semibold">转发到</h3>
+          <button type="button" className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs dark:border-slate-700" onClick={() => setForwardTarget(null)}>
+            关闭
+          </button>
+        </header>
+        <div className="max-h-[320px] overflow-y-auto p-2">
+          {state.conversations.length === 0 ? (
+            <p className="py-4 text-center text-xs text-slate-500">暂无会话</p>
+          ) : null}
+          {state.conversations.map((item) => {
+            const title = item.type === 2
+              ? imStore.groupName(item.group_id)
+              : imStore.friendName(item.peer_id);
+            return (
+              <button
+                key={item.conversation_id}
+                type="button"
+                className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-[13px] hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                onClick={() => {
+                  const target = forwardTarget;
+                  setForwardTarget(null);
+                  if (target) void imStore.forwardMessage(target, item.conversation_id);
+                }}
+              >
+                <Avatar name={title} seed={item.conversation_id} size={26} />
+                <span className="truncate">{title}</span>
+              </button>
+            );
+          })}
+        </div>
+      </dialog>
     </section>
   );
 }

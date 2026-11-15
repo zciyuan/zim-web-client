@@ -64,6 +64,25 @@ export const attachmentOf = (raw: string): AttachmentInfo | null => {
   };
 };
 
+/** Quote block embedded in a 1504 reply. */
+export interface QuoteInfo {
+  server_msg_id: string;
+  send_id: string;
+  text: string;
+}
+
+/** Reads the quote block of a reply, or null. */
+export const quoteOf = (raw: string): QuoteInfo | null => {
+  const parsed = parseContent(raw);
+  const quote = parsed?.quote as Record<string, unknown> | undefined;
+  if (!quote || typeof quote.text !== 'string') return null;
+  return {
+    server_msg_id: typeof quote.server_msg_id === 'string' ? quote.server_msg_id : '',
+    send_id: quote.send_id === undefined ? '' : String(quote.send_id),
+    text: quote.text,
+  };
+};
+
 /** Text to show inside a bubble. */
 export const messageText = (raw: string, msgType: number): { text: string; system: boolean } => {
   if (msgType >= 20 && msgType <= 22) {

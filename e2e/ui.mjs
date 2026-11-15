@@ -499,6 +499,62 @@ const main = async () => {
     { timeout: 20_000 },
   );
 
+  step('quote reply carries the quoted snippet');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  // Quote Bob's message (the first incoming bubble in the thread).
+  await alice.evaluate(() => {
+    const bubble = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .find((node) => node.getAttribute('data-mine') === 'false');
+    const button = bubble && [...bubble.querySelectorAll('button')].find((item) => item.textContent === '引用');
+    if (!button) throw new Error('quote button missing');
+    button.click();
+  });
+  await alice.waitForSelector('[data-quote-preview]', { timeout: 10_000 });
+  await setValue(alice, 'textarea', '引用测试回复');
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    if (!button) throw new Error('send button missing');
+    button.click();
+  });
+  await alice.waitForFunction(
+    () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes('引用测试回复') && (node.textContent ?? '').includes('React 实时消息')),
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '18-quote.png') });
+
+  step('forward sends the message to another conversation');
+  // Wait for the quote reply to settle: forwarding a draft has no server id yet.
+  await alice.waitForFunction(
+    () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes('引用测试回复') && node.getAttribute('data-state') === 'sent'),
+    { timeout: 20_000 },
+  );
+  await alice.evaluate(() => {
+    const bubbles = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')];
+    const source = bubbles.find((node) => (node.textContent ?? '').includes('引用测试回复'))
+      ?? bubbles[bubbles.length - 1];
+    const button = source && [...source.querySelectorAll('button')].find((item) => item.textContent === '转发');
+    if (!button) throw new Error('forward button missing');
+    button.click();
+  });
+  await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const options = [...document.querySelectorAll('dialog[open] button')]
+      .filter((item) => item.textContent && item.textContent.trim() !== '关闭');
+    const group = options.find((item) => (item.textContent ?? '').includes('E2E 群')) ?? options[0];
+    if (!group) throw new Error('no forward target');
+    group.click();
+  });
+  await alice.waitForFunction(
+    () => window.__zim.getSnapshot().conversations.some((item) => JSON.stringify(item).includes('引用测试回复')),
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '19-forward.png') });
+
   step('PWA manifest is served');
   const manifest = await alice.evaluate(async () => {
     const response = await fetch('/manifest.webmanifest');

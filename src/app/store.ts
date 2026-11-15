@@ -8,11 +8,13 @@ import { useSyncExternalStore } from 'react';
 import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
+import { messageText } from './format';
 import { measureImage, measureMedia } from './image';
 import {
   OP,
   decodeMessageItem,
   decodeMyGroupsRes,
+  decodeQuoteRes,
   decodeSearchMessageRes,
   decodeOperationRes,
   decodeReadReceiptRes,
@@ -22,6 +24,7 @@ import {
   encodeMyGroupsReq,
   encodeReactionReq,
   encodeRecallReq,
+  encodeQuoteReq,
   encodeSearchMessageReq,
   encodeReadReceiptReq,
   encodeSendGroupReq,
@@ -118,6 +121,7 @@ export interface ImState {
   status: AppStatus;
   authError: string;
   connection: ConnectionState;
+  quoteTarget: UiMessage | null;
   call: CallStatus;
   /** last RTC failure, kept for diagnostics */
   lastCallError: string;
@@ -149,6 +153,7 @@ const initialState: ImState = {
   status: 'idle',
   authError: '',
   connection: 'idle',
+  quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
   me: null,
@@ -1031,6 +1036,11 @@ class ImStore {
   async sendMessage(text: string): Promise<void> {
     const content = text.trim();
     if (!content) return;
+    // A pending quote target turns the next text into a 1504 reply.
+    if (this.state.quoteTarget) {
+      await this.sendQuote(content);
+      return;
+    }
     await this.sendContent(1, JSON.stringify({ text: content }));
   }
 
@@ -1142,6 +1152,97 @@ class ImStore {
     const conversation = this.conversation(message.conversation_id);
     if (!conversation) return;
     await this.deliver({ ...message, localState: 'sending' }, conversation);
+  }
+
+  // ------------------------------------------------------------- quote/forward --
+
+  /** Marks a message as the quote target for the next send. */
+  setQuoteTarget(message: UiMessage | null): void {
+    this.set({ quoteTarget: message });
+  }
+
+  /** 1504: sends a reply that quotes the target message. */
+  async sendQuote(text: string): Promise<void> {
+    const target = this.state.quoteTarget;
+    const conversation = this.conversation(this.state.activeCid);
+    if (!target || !target.server_msg_id || !conversation || !this.client) return;
+    const clientMsgId = crypto.randomUUID();
+    const preview = messageText(target.content, target.msg_type).text.slice(0, 120);
+    const content = JSON.stringify({
+      text,
+      quote: { server_msg_id: target.server_msg_id, send_id: target.send_id, msg_type: target.msg_type, text: preview },
+    });
+    const draft: UiMessage = {
+      server_msg_id: '',
+      client_msg_id: clientMsgId,
+      conversation_id: conversation.conversation_id,
+      seq: '0',
+      send_id: this.state.me?.uid ?? '',
+      recv_id: conversation.type === 1 ? conversation.peer_id : '0',
+      group_id: conversation.type === 2 ? conversation.group_id : '0',
+      msg_type: 1,
+      content,
+      at_user_ids: [],
+      send_time: String(Date.now()),
+      status: 0,
+      localState: 'sending',
+    };
+    const thread = this.state.threads[conversation.conversation_id] ?? emptyThread();
+    this.patchThread(conversation.conversation_id, { items: [...thread.items, draft] });
+    this.set({ quoteTarget: null });
+
+    try {
+      const res = await this.client.request(
+        OP.QUOTE,
+        encodeQuoteReq({
+          clientMsgId,
+          recvId: conversation.type === 1 ? conversation.peer_id : undefined,
+          groupId: conversation.type === 2 ? conversation.group_id : undefined,
+          serverMsgId: target.server_msg_id,
+          content: JSON.stringify({ text }),
+        }),
+        decodeQuoteRes,
+      );
+      this.updateMessage(conversation.conversation_id, clientMsgId, {
+        server_msg_id: res.payload.server_msg_id,
+        seq: res.payload.seq,
+        send_time: res.payload.send_time,
+        localState: 'sent',
+      });
+    } catch (err) {
+      this.updateMessage(conversation.conversation_id, clientMsgId, { localState: 'failed' });
+      this.notify(`引用回复失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** Forwards one message into another conversation (text or attachment). */
+  async forwardMessage(message: UiMessage, targetCid: string): Promise<void> {
+    const conversation = this.conversation(targetCid);
+    if (!conversation || !this.client) return;
+    if (!message.server_msg_id) {
+      this.notify('消息尚未发送完成，无法转发', 'error');
+      return;
+    }
+    try {
+      const payload = conversation.type === 2
+        ? encodeSendGroupReq({
+          clientMsgId: crypto.randomUUID(),
+          groupId: conversation.group_id,
+          msgType: message.msg_type,
+          content: message.content,
+        })
+        : encodeSendSingleReq({
+          clientMsgId: crypto.randomUUID(),
+          recvId: conversation.peer_id,
+          msgType: message.msg_type,
+          content: message.content,
+        });
+      await this.client.request(conversation.type === 2 ? OP.SEND_GROUP : OP.SEND_SINGLE, payload, decodeSendRes);
+      await this.refreshConversations();
+      this.notify('已转发');
+    } catch (err) {
+      this.notify(`转发失败：${wrapError(err).display}`, 'error');
+    }
   }
 
   private async deliver(draft: UiMessage, conversation: Conversation): Promise<void> {

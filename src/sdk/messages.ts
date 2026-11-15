@@ -20,6 +20,7 @@ export const OP = {
   MY_GROUPS: 1314,
   SEND_SINGLE: 1501,
   SEND_GROUP: 1502,
+  QUOTE: 1504,
   READ_RECEIPT: 1505,
   RECALL: 1506,
   ADD_REACTION: 1515,
@@ -290,6 +291,31 @@ export const decodeReadReceiptRes = (bytes: Uint8Array): { read_seq: string } =>
     else reader.skip(wire);
   });
   return { read_seq: readSeq };
+};
+
+/** 1504 QuoteMessage { client_msg_id=1; recv_id=2; group_id=3; server_msg_id=4; content=5; } */
+export const encodeQuoteReq = (req: {
+  clientMsgId: string;
+  recvId?: string;
+  groupId?: string;
+  serverMsgId: string;
+  content: string;
+}): Uint8Array => {
+  const writer = new Writer().string(1, req.clientMsgId);
+  if (req.recvId) writer.int64(2, Number(req.recvId));
+  if (req.groupId) writer.int64(3, Number(req.groupId));
+  return writer.string(4, req.serverMsgId).string(5, req.content).finish();
+};
+
+export const decodeQuoteRes = (bytes: Uint8Array): SendRes => {
+  const result: SendRes = { server_msg_id: '', seq: '0', send_time: '0', unread_count: '0' };
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) result.server_msg_id = reader.string();
+    else if (field === 2) result.seq = reader.int64();
+    else if (field === 3) result.send_time = reader.int64();
+    else reader.skip(wire);
+  });
+  return result;
 };
 
 /** 1506 Recall { string conversation_id=1; string server_msg_id=2; } */
