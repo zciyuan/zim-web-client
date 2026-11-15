@@ -866,6 +866,20 @@ class ImStore {
     this.set({ threads: { ...this.state.threads, [cid]: { ...current, ...patch } } });
   }
 
+  /** Appends one message, de-duplicated against the *current* thread state.
+   *
+   * Pushes can arrive back-to-back while a history page is in flight; reading
+   * state at append time (instead of a stale closure copy) keeps React keys
+   * unique.
+   */
+  private appendToThread(cid: string, message: UiMessage): void {
+    const current = this.state.threads[cid] ?? emptyThread();
+    if (message.server_msg_id && current.items.some((item) => item.server_msg_id === message.server_msg_id)) {
+      return;
+    }
+    this.patchThread(cid, { items: [...current.items, message] });
+  }
+
   async loadOlderMessages(cid: string): Promise<void> {
     const conversation = this.conversation(cid);
     const thread = this.state.threads[cid];
@@ -1101,8 +1115,8 @@ class ImStore {
     }
 
     const thread = this.state.threads[cid];
-    if (thread && !thread.loading && !thread.items.some((entry) => entry.server_msg_id === item.server_msg_id)) {
-      this.patchThread(cid, { items: [...thread.items, { ...item, localState: 'sent' }] });
+    if (thread && !thread.loading) {
+      this.appendToThread(cid, { ...item, localState: 'sent' });
     } else if (!thread || thread.loading) {
       // A push can beat the history request. Buffer it and let openConversation
       // merge after the page lands; otherwise the message is lost until reload.
