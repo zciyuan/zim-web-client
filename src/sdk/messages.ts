@@ -28,6 +28,8 @@ export const OP = {
   DELETE: 1508,
   PULL_BY_SEQ: 1511,
   SEARCH: 1512,
+  SYNC_MISSING: 1514,
+  SYNC_CHECK: 1601,
   PUSH_MSG: 1901,
   PUSH_KICK: 1902,
 } as const;

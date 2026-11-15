@@ -440,6 +440,10 @@ const main = async () => {
   }
   await alice.screenshot({ path: path.join(OUT, '10-group-create.png') });
 
+  step('incremental sync converges without a full reload');
+  const syncResult = await alice.evaluate(async () => window.__zim.runSync());
+  assert.equal(syncResult.full, false, 'sync should be incremental after login');
+  await alice.screenshot({ path: path.join(OUT, '16-sync.png') });
   step('PWA manifest is served');
   const manifest = await alice.evaluate(async () => {
     const response = await fetch('/manifest.webmanifest');

@@ -27,6 +27,12 @@ import {
   encodeSendGroupReq,
   encodeSendSingleReq,
 } from '../sdk/messages';
+import {
+  decodeSyncCheckRes,
+  decodeSyncMissingRes,
+  encodeSyncCheckReq,
+  encodeSyncMissingReq,
+} from '../sdk/sync';
 import { IMHttp } from '../sdk/rest';
 import {
   GROUP_OP,
@@ -51,9 +57,19 @@ import {
   type GroupMemberInfo,
   type GroupSummary,
 } from '../sdk/groups';
-import type { Conversation, Friend, FriendRequestItem, Group, GroupMember, MessageItem, UserProfile } from '../sdk/types';
+import type {
+  Conversation,
+  Friend,
+  FriendRequestItem,
+  Group,
+  GroupMember,
+  LoginRes,
+  MessageItem,
+  UserProfile,
+} from '../sdk/types';
 
 const SESSION_KEY = 'zim.session';
+const SYNC_KEY = 'zim.sync';
 const DEVICE_KEY = 'zim.device';
 const ENDPOINT_KEY = 'zim.endpoint';
 const SDK_VERSION = 'web-2.0.0';
@@ -389,6 +405,8 @@ class ImStore {
         if (import.meta.env.DEV) console.debug(`[zim] conn ${connection} ${detail?.code ?? ''} ${detail?.reason ?? ''}`);
         this.set({ connection: connection === 'reconnected' ? 'open' : connection });
         if (connection === 'offline') this.notify('连接已断开，自动重连已放弃，请刷新页面', 'error');
+        // A reconnect may have missed pushes: converge with 1601/1514.
+        if (connection === 'reconnected') void this.runSync();
       },
       onPush: (event) => void this.handlePush(event),
       onKick: (event) => this.handleKick(event.reason),
@@ -397,6 +415,7 @@ class ImStore {
     const login = await this.client.open(token);
     // The REST client owns both tokens (login or refresh may have rotated them).
     this.persistSession(endpoint, username);
+    this.rememberSyncBaseline(login.uid, login.sync);
 
     this.set({
       status: 'ready',
@@ -408,6 +427,8 @@ class ImStore {
       },
     });
     await this.bootstrap();
+    // Catch up on anything that changed while this client was offline.
+    void this.runSync();
   }
 
   private persistSession(endpoint: string, username: string): void {
@@ -1262,6 +1283,111 @@ class ImStore {
       decodeSearchMessageRes,
     );
     return res.payload.map((item) => ({ ...item, localState: 'sent' as const }));
+  }
+
+  // ------------------------------------------------------------------ sync --
+
+  /** Records the login watermarks as the next 1601 baseline. */
+  private rememberSyncBaseline(uid: string, sync: LoginRes['sync']): void {
+    if (!sync || !uid) return;
+    const baseline = {
+      conversationVersion: Number(sync.conversation_version ?? 0),
+      friendVersion: Number(sync.friend_version ?? 0),
+      maxSeqs: Object.fromEntries(
+        Object.entries(sync.max_seqs ?? {}).map(([key, value]) => [key, Number(value)]),
+      ),
+    };
+    localStorage.setItem(`${SYNC_KEY}.${uid}`, JSON.stringify(baseline));
+  }
+
+  private loadSyncBaseline(): { conversationVersion: number; friendVersion: number; maxSeqs: Record<string, number> } | null {
+    const uid = this.state.me?.uid;
+    if (!uid) return null;
+    const raw = localStorage.getItem(`${SYNC_KEY}.${uid}`);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as { conversationVersion: number; friendVersion: number; maxSeqs: Record<string, number> };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Converges with the server after a reconnect: 1601 tells us which
+   * conversations moved, 1514 fills the gaps we missed.
+   */
+  async runSync(): Promise<{ full: boolean; gaps: number }> {
+    if (!this.client || this.state.status !== 'ready') return { full: false, gaps: 0 };
+    const baseline = this.loadSyncBaseline();
+    if (!baseline) {
+      await this.refresh();
+      return { full: true, gaps: 0 };
+    }
+    try {
+      const check = await this.client.request(
+        OP.SYNC_CHECK,
+        encodeSyncCheckReq({
+          conversationVersion: baseline.conversationVersion,
+          friendVersion: baseline.friendVersion,
+          maxSeqs: baseline.maxSeqs,
+        }),
+        decodeSyncCheckRes,
+      );
+      const result = check.payload;
+      if (result.full_sync_required) {
+        await this.refresh();
+        this.saveSyncState(result.conversation_version, result.friend_version, this.currentMaxSeqs());
+        return { full: true, gaps: 0 };
+      }
+
+      let gaps = 0;
+      for (const range of result.conversation_diff) {
+        const thread = this.state.threads[range.conv_id];
+        // Only loaded threads are patched; the rest re-read on open.
+        if (!thread) continue;
+        const from = Number(range.from_seq);
+        const to = Number(range.to_seq);
+        if (to < from) continue;
+        const seqs: number[] = [];
+        for (let seq = from; seq <= to && seqs.length < 200; seq += 1) seqs.push(seq);
+        if (seqs.length === 0) continue;
+        const missingRes = await this.client.request(
+          OP.SYNC_MISSING,
+          encodeSyncMissingReq({ conversationId: range.conv_id, seqs, limit: 200 }),
+          decodeSyncMissingRes,
+        );
+        for (const item of missingRes.payload.messages) {
+          this.appendToThread(range.conv_id, { ...item, conversation_id: range.conv_id, localState: 'sent' });
+          gaps += 1;
+        }
+      }
+      if (result.friend_changed) await this.refreshRelations();
+      await this.refreshConversations();
+      this.saveSyncState(result.conversation_version, result.friend_version, this.currentMaxSeqs());
+      return { full: false, gaps };
+    } catch (err) {
+      if (import.meta.env.DEV) console.debug('[zim] sync failed', err);
+      return { full: false, gaps: 0 };
+    }
+  }
+
+  private currentMaxSeqs(): Record<string, number> {
+    const maxSeqs: Record<string, number> = {};
+    for (const conversation of this.state.conversations) {
+      const seq = Number(conversation.max_seq ?? conversation.last_msg_seq ?? 0);
+      if (seq > 0) maxSeqs[conversation.conversation_id] = seq;
+    }
+    return maxSeqs;
+  }
+
+  private saveSyncState(conversationVersion: string, friendVersion: string, maxSeqs: Record<string, number>): void {
+    const uid = this.state.me?.uid;
+    if (!uid) return;
+    localStorage.setItem(`${SYNC_KEY}.${uid}`, JSON.stringify({
+      conversationVersion: Number(conversationVersion),
+      friendVersion: Number(friendVersion),
+      maxSeqs,
+    }));
   }
 
   // ------------------------------------------------------------------ push --
