@@ -22,6 +22,29 @@ import {
   encodeSendSingleReq,
 } from '../sdk/messages';
 import { IMHttp } from '../sdk/rest';
+import {
+  GROUP_OP,
+  decodeCreateGroupRes,
+  decodeGroupMembersRes,
+  decodeGroupOperationRes,
+  decodeSearchGroupRes,
+  decodeUpdateGroupRes,
+  encodeAnswerJoinReq,
+  encodeApplyJoinReq,
+  encodeCreateGroupReq,
+  encodeGroupIdReq,
+  encodeGroupMembersReq,
+  encodeGroupNotifyReq,
+  encodeGroupUserReq,
+  encodeInviteGroupMembersReq,
+  encodeMuteAllReq,
+  encodeMuteMemberReq,
+  encodeSearchGroupReq,
+  encodeSetGroupAdminReq,
+  encodeUpdateGroupReq,
+  type GroupMemberInfo,
+  type GroupSummary,
+} from '../sdk/groups';
 import type { Conversation, Friend, Group, GroupMember, MessageItem, UserProfile } from '../sdk/types';
 
 const SESSION_KEY = 'zim.session';
@@ -69,6 +92,8 @@ export interface ImState {
   activeCid: string | null;
   threads: Record<string, Thread>;
   toast: Toast | null;
+  /** diagnostics: number of 1901 frames accepted */
+  pushCount: number;
 }
 
 interface SavedSession {
@@ -91,6 +116,7 @@ const initialState: ImState = {
   activeCid: null,
   threads: {},
   toast: null,
+  pushCount: 0,
 };
 
 const normalizeHttpBase = (raw: string): string => {
@@ -145,6 +171,8 @@ class ImStore {
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
+  /** Pushes that arrived while a thread page was still loading, keyed by cid. */
+  private pendingPushes = new Map<string, UiMessage[]>();
 
   // ------------------------------------------------------------ plumbing --
 
@@ -327,7 +355,8 @@ class ImStore {
       sdk: SDK_VERSION,
       deviceId: deviceId(),
       deviceName: '浏览器',
-      onState: (connection) => {
+      onState: (connection, detail) => {
+        if (import.meta.env.DEV) console.debug('[zim] conn', connection, detail ?? '');
         this.set({ connection: connection === 'reconnected' ? 'open' : connection });
         if (connection === 'offline') this.notify('连接已断开，自动重连已放弃，请刷新页面', 'error');
       },
@@ -449,7 +478,13 @@ class ImStore {
     this.patchThread(cid, { loading: true, error: '' });
     try {
       const { messages, hasMoreOlder } = await loadTail(this.rest, conversation, 40);
-      this.patchThread(cid, { items: messages, loading: false, hasMoreOlder, error: '' });
+      // Merge anything that arrived over the socket while the page was loading.
+      const pending = this.pendingPushes.get(cid) ?? [];
+      this.pendingPushes.delete(cid);
+      const seen = new Set(messages.map((message) => message.server_msg_id).filter(Boolean));
+      const merged = [...messages, ...pending.filter((message) => message.server_msg_id && !seen.has(message.server_msg_id))];
+      merged.sort((a, b) => Number(a.seq) - Number(b.seq));
+      this.patchThread(cid, { items: merged, loading: false, hasMoreOlder, error: '' });
       await this.markRead(cid);
     } catch (err) {
       this.patchThread(cid, { loading: false, error: wrapError(err).message });
@@ -457,24 +492,193 @@ class ImStore {
   }
 
   /** Group members, with nicknames resolved through the batch profile endpoint. */
+  /** Group members with roles (WS 1310) and nicknames (REST batch profiles). */
   async groupMembers(gid: string): Promise<GroupMember[]> {
-    const members = await this.rest.groupMembers(gid);
-    const uids = members.map((member) => String(member.user_id)).filter(Boolean);
-    if (uids.length === 0) return members;
+    if (!this.client) throw new ImError(0, '连接未就绪');
+    const res = await this.client.request(
+      GROUP_OP.MEMBERS,
+      encodeGroupMembersReq({ groupId: gid, limit: 200 }),
+      decodeGroupMembersRes,
+    );
+    const rows: GroupMemberInfo[] = res.payload;
+    const uids = rows.map((row) => row.uid).filter(Boolean);
     let profiles: UserProfile[] = [];
-    try {
-      profiles = await this.rest.users(uids);
-    } catch {
-      profiles = [];
+    if (uids.length > 0) {
+      try {
+        profiles = await this.rest.users(uids);
+      } catch {
+        profiles = [];
+      }
     }
     const byUid = new Map(profiles.map((profile) => [String(profile.uid), profile]));
-    return members.map((member) => {
-      const profile = byUid.get(String(member.user_id));
-      return { ...member, nickname: profile?.nickname, username: profile?.username };
+    return rows.map((row) => {
+      const profile = byUid.get(String(row.uid));
+      return {
+        user_id: row.uid,
+        role: row.role,
+        mute_until: row.mute_until,
+        joined_at: row.joined_at,
+        nickname: profile?.nickname,
+        username: profile?.username,
+      };
     });
   }
 
-  openFriend(friend: Friend): void {    const selfUid = this.state.me?.uid ?? '';
+  /** Full group profile (name / notice / join policy) over REST. */
+  async groupDetail(gid: string): Promise<Group | null> {
+    try {
+      return await this.rest.group(gid);
+    } catch (err) {
+      this.notify(wrapError(err).display, 'error');
+      return null;
+    }
+  }
+
+  /** Pending join requests (owner/admin only; empty for members). */
+  groupApplies(gid: string): Promise<unknown[]> {
+    return this.rest.groupApplies(gid);
+  }
+
+  // ------------------------------------------------------------- group ops --
+
+  /** Runs a group action, then refreshes the group snapshots. */
+  private async groupAction<T>(
+    label: string,
+    run: (client: IMClient) => Promise<T>,
+  ): Promise<T> {
+    if (!this.client) throw new ImError(0, '连接未就绪');
+    try {
+      const result = await run(this.client);
+      await this.refreshGroups();
+      return result;
+    } catch (err) {
+      this.notify(`${label}失败：${wrapError(err).display}`, 'error');
+      throw err;
+    }
+  }
+
+  private async refreshGroups(): Promise<void> {
+    try {
+      const groups = await this.rest.groups();
+      const exact = new Map(
+        this.state.groups.map((group) => [roundedKey(group.group_id), group.display_id ?? String(group.group_id)]),
+      );
+      this.set({
+        groups: groups.map((group) => ({
+          ...group,
+          display_id: exact.get(roundedKey(group.group_id)) ?? String(group.group_id),
+        })),
+      });
+      await this.refreshConversations();
+    } catch {
+      // A stale list is better than a failed action; the next refresh fixes it.
+    }
+  }
+
+  private async refreshConversations(): Promise<void> {
+    try {
+      const items = await this.rest.conversations();
+      const selfUid = this.state.me?.uid ?? '';
+      this.set({ conversations: items.map((item) => normalizeConversation(item, selfUid)) });
+    } catch {
+      // ignore
+    }
+  }
+
+  async createGroup(name: string, memberIds: string[]): Promise<string> {
+    const res = await this.groupAction('创建群', (client) =>
+      client.request(GROUP_OP.CREATE, encodeCreateGroupReq({ name, memberIds, groupType: 1 }), decodeCreateGroupRes));
+    this.notify(`群「${res.payload.name || name}」已创建`);
+    return res.payload.group_id;
+  }
+
+  async inviteGroupMembers(gid: string, userIds: string[]): Promise<void> {
+    await this.groupAction('邀请成员', (client) =>
+      client.request(GROUP_OP.INVITE, encodeInviteGroupMembersReq(gid, userIds), decodeGroupOperationRes));
+    this.notify('邀请已发送');
+  }
+
+  async kickGroupMember(gid: string, uid: string): Promise<void> {
+    await this.groupAction('移除成员', (client) =>
+      client.request(GROUP_OP.KICK, encodeGroupUserReq(gid, uid), decodeGroupOperationRes));
+    this.notify('成员已移除');
+  }
+
+  async quitGroup(gid: string): Promise<void> {
+    await this.groupAction('退群', (client) =>
+      client.request(GROUP_OP.QUIT, encodeGroupIdReq(gid), decodeGroupOperationRes));
+    this.set({ activeCid: null });
+    this.notify('已退出群');
+  }
+
+  async dismissGroup(gid: string): Promise<void> {
+    await this.groupAction('解散群', (client) =>
+      client.request(GROUP_OP.DISMISS, encodeGroupIdReq(gid), decodeGroupOperationRes));
+    this.set({ activeCid: null });
+    this.notify('群已解散');
+  }
+
+  async transferGroup(gid: string, newOwnerUid: string): Promise<void> {
+    await this.groupAction('转让群主', (client) =>
+      client.request(GROUP_OP.TRANSFER, encodeGroupUserReq(gid, newOwnerUid), decodeGroupOperationRes));
+    this.notify('已转让群主');
+  }
+
+  async updateGroupInfo(
+    gid: string,
+    patch: { name?: string; notification?: string; needVerification?: number; lookMemberInfo?: number; applyMemberFriend?: number },
+  ): Promise<void> {
+    await this.groupAction('更新群资料', (client) =>
+      client.request(GROUP_OP.UPDATE_INFO, encodeUpdateGroupReq({ groupId: gid, ...patch }), decodeUpdateGroupRes));
+    this.notify('群资料已更新');
+  }
+
+  async setGroupAdmin(gid: string, uid: string, admin: boolean): Promise<void> {
+    await this.groupAction(admin ? '设置管理员' : '取消管理员', (client) =>
+      client.request(GROUP_OP.SET_ADMIN, encodeSetGroupAdminReq({ groupId: gid, userId: uid, admin }), decodeGroupOperationRes));
+    this.notify(admin ? '已设为管理员' : '已取消管理员');
+  }
+
+  async muteGroupMember(gid: string, uid: string, minutes: number): Promise<void> {
+    const until = minutes > 0 ? Date.now() + minutes * 60_000 : 0;
+    await this.groupAction(minutes > 0 ? '禁言' : '解除禁言', (client) =>
+      client.request(GROUP_OP.MUTE_MEMBER, encodeMuteMemberReq({ groupId: gid, userId: uid, until }), decodeGroupOperationRes));
+    this.notify(minutes > 0 ? `已禁言 ${minutes} 分钟` : '已解除禁言');
+  }
+
+  async muteAllGroup(gid: string, minutes: number): Promise<void> {
+    const until = minutes > 0 ? Date.now() + minutes * 60_000 : 0;
+    await this.groupAction(minutes > 0 ? '全员禁言' : '取消全员禁言', (client) =>
+      client.request(GROUP_OP.MUTE_ALL, encodeMuteAllReq(gid, until), decodeGroupOperationRes));
+    this.notify(minutes > 0 ? '已开启全员禁言' : '已取消全员禁言');
+  }
+
+  async setGroupNotify(gid: string, recvOpt: number): Promise<void> {
+    await this.groupAction('设置消息提醒', (client) =>
+      client.request(GROUP_OP.NOTIFY, encodeGroupNotifyReq(gid, recvOpt), decodeGroupOperationRes));
+    this.notify(recvOpt === 0 ? '已开启消息提醒' : '已关闭消息提醒');
+  }
+
+  async searchGroups(keyword: string): Promise<GroupSummary[]> {
+    if (!this.client) return [];
+    const res = await this.client.request(GROUP_OP.SEARCH, encodeSearchGroupReq(keyword), decodeSearchGroupRes);
+    return res.payload;
+  }
+
+  async applyJoinGroup(gid: string, why: string): Promise<void> {
+    await this.groupAction('申请入群', (client) =>
+      client.request(GROUP_OP.APPLY_JOIN, encodeApplyJoinReq(gid, why), decodeGroupOperationRes));
+    this.notify('入群申请已提交');
+  }
+
+  async answerJoinGroup(gid: string, uid: string, accept: boolean): Promise<void> {
+    await this.groupAction(accept ? '同意入群' : '拒绝入群', (client) =>
+      client.request(GROUP_OP.ANSWER_JOIN, encodeAnswerJoinReq({ groupId: gid, userId: uid, accept }), decodeGroupOperationRes));
+    this.notify(accept ? '已同意' : '已拒绝');
+  }
+
+  openFriend(friend: Friend): void {
+    const selfUid = this.state.me?.uid ?? '';
     const cid = directConversationId(selfUid, String(friend.friend_id));
     if (!this.conversation(cid)) {
       this.set({
@@ -503,6 +707,13 @@ class ImStore {
   openGroup(group: Group): void {
     const gid = this.exactGroupId(String(group.group_id));
     const cid = groupConversationId(gid);
+    // Keep the snapshot complete: a freshly created group may not be back from
+    // REST yet, and the header title resolves through state.groups.
+    if (!this.state.groups.some((item) => roundedKey(item.group_id) === roundedKey(gid))) {
+      this.set({
+        groups: [...this.state.groups, { ...group, group_id: gid, display_id: gid }],
+      });
+    }
     if (!this.conversation(cid)) {
       this.set({
         conversations: [
@@ -729,6 +940,7 @@ class ImStore {
     } catch {
       return;
     }
+    this.set({ pushCount: this.state.pushCount + 1 });
     if (item.server_msg_id) {
       if (this.seenPushes.has(item.server_msg_id)) return;
       this.seenPushes.add(item.server_msg_id);
@@ -766,8 +978,16 @@ class ImStore {
     }
 
     const thread = this.state.threads[cid];
-    if (thread && !thread.items.some((entry) => entry.server_msg_id === item.server_msg_id)) {
+    if (thread && !thread.loading && !thread.items.some((entry) => entry.server_msg_id === item.server_msg_id)) {
       this.patchThread(cid, { items: [...thread.items, { ...item, localState: 'sent' }] });
+    } else if (!thread || thread.loading) {
+      // A push can beat the history request. Buffer it and let openConversation
+      // merge after the page lands; otherwise the message is lost until reload.
+      const pending = this.pendingPushes.get(cid) ?? [];
+      if (!pending.some((entry) => entry.server_msg_id === item.server_msg_id)) {
+        pending.push({ ...item, localState: 'sent' });
+        this.pendingPushes.set(cid, pending);
+      }
     }
 
     const active = this.state.activeCid === cid && document.visibilityState === 'visible';

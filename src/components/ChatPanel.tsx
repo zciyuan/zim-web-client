@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardE
 
 import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
-import { MembersDialog } from './MembersDialog';
+import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { imStore, useIm, type UiMessage } from '../app/store';
 import { formatClock, imageOf, messageText } from '../app/format';
 
@@ -251,7 +251,7 @@ export function ChatPanel() {
             onClick={() => setMembersOpen(true)}
             className="shrink-0 rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
           >
-            成员
+            群设置
           </button>
         ) : null}
       </header>
@@ -292,10 +292,9 @@ export function ChatPanel() {
 
       <Composer disabled={state.connection !== 'open'} />
 
-      <MembersDialog
+      <GroupSettingsDialog
         open={membersOpen}
         gid={String(conversation.group_id)}
-        title={title}
         onClose={() => setMembersOpen(false)}
       />
     </section>

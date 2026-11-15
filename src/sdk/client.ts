@@ -52,7 +52,7 @@ export interface IMClientOptions {
   deviceId?: string;
   deviceName?: string;
   socketFactory?: (url: string) => WebSocket;
-  onState?: (state: ConnectionState) => void;
+  onState?: (state: ConnectionState, detail?: { code?: number; reason?: string }) => void;
   onPush?: (event: PushEvent) => void;
   onKick?: (event: KickEvent) => void;
   requestTimeoutMs?: number;
@@ -116,9 +116,9 @@ export class IMClient {
     return this.currentState;
   }
 
-  private setState(state: ConnectionState): void {
+  private setState(state: ConnectionState, detail?: { code?: number; reason?: string }): void {
     this.currentState = state;
-    this.options.onState?.(state);
+    this.options.onState?.(state, detail);
   }
 
   /** Dials the gate and completes op:1001. Resolves with LoginRes. */
@@ -190,7 +190,7 @@ export class IMClient {
 
       socket.addEventListener('close', (event) => {
         this.flushPending(new ImError(0, '连接已断开'));
-        this.setState('closed');
+        this.setState('closed', { code: event.code, reason: event.reason });
         this.socket = null;
         settle(reject, new ImError(0, '连接已关闭'));
         if (!this.manualClose) this.scheduleReconnect();

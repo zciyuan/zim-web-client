@@ -92,11 +92,16 @@ export interface Friend {
 export interface Group {
   group_id: string;
   name?: string;
+  face_url?: string;
+  notification?: string;
   owner_id?: string;
   group_type?: number;
   max_member?: number;
   member_count?: number;
   created_at?: number;
+  need_verification?: number;
+  look_member_info?: number;
+  apply_member_friend?: number;
   /** exact (unrounded) gid resolved over the wire protocol */
   display_id?: string;
 }

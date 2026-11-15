@@ -294,4 +294,11 @@ export class IMHttp {
     return this.send<{ members: GroupMember[] }>('GET', `/v1/groups/${encodeURIComponent(gid)}/members`)
       .then((data) => data.members ?? []);
   }
+
+  /** Pending join requests, for owners/admins. */
+  groupApplies(gid: string, status = 0): Promise<unknown[]> {
+    return this.send<{ applies: unknown[] }>('GET', `/v1/groups/${encodeURIComponent(gid)}/applies`, {
+      params: { status },
+    }).then((data) => data.applies ?? []);
+  }
 }

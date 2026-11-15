@@ -1,5 +1,8 @@
+import { useState } from 'react';
+
 import { Avatar } from './Avatar';
 import { ChatPanel } from './ChatPanel';
+import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
 import { formatListTime, previewConversation } from '../app/format';
 
@@ -88,6 +91,7 @@ function EmptyList({ text }: { text: string }) {
 
 function Sidebar() {
   const state = useIm();
+  const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const title =
     state.tab === 'friends' ? `好友（${state.friends.length}）`
       : state.tab === 'groups' ? `群聊（${state.groups.length}）`
@@ -100,13 +104,24 @@ function Sidebar() {
     >
       <header className="flex items-center justify-between px-4 pt-4 pb-2.5">
         <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h2>
-        <button
-          type="button"
-          onClick={() => void imStore.refresh()}
-          className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-slate-900 dark:border-slate-700 dark:hover:text-slate-100"
-        >
-          刷新
-        </button>
+        <span className="flex items-center gap-1">
+          {state.tab === 'groups' ? (
+            <button
+              type="button"
+              onClick={() => setGroupDialogOpen(true)}
+              className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-slate-900 dark:border-slate-700 dark:hover:text-slate-100"
+            >
+              + 新建
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void imStore.refresh()}
+            className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-slate-900 dark:border-slate-700 dark:hover:text-slate-100"
+          >
+            刷新
+          </button>
+        </span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-2 pb-3">
@@ -208,6 +223,8 @@ function Sidebar() {
           )
         ) : null}
       </div>
+
+      <GroupDialogs open={groupDialogOpen} onClose={() => setGroupDialogOpen(false)} />
     </section>
   );
 }
