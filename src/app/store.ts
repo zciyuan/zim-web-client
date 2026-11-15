@@ -20,6 +20,7 @@ import {
   encodeDeleteMessageReq,
   encodeEditMessageReq,
   encodeMyGroupsReq,
+  encodeReactionReq,
   encodeRecallReq,
   encodeSearchMessageReq,
   encodeReadReceiptReq,
@@ -164,6 +165,23 @@ const normalizeConversation = (item: Conversation, selfUid: string): Conversatio
     item.peer_id = String(a) === String(selfUid) ? b : a;
   }
   return item;
+};
+
+/**
+ * Collapses items that share a server_msg_id, keeping the last occurrence.
+ *
+ * The same message can reach a thread twice: once as the send response and once
+ * as the 1901 push (or twice through a resend), and React keys must stay unique.
+ */
+const dedupeMessages = (items: UiMessage[]): UiMessage[] => {
+  const seen = new Map<string, UiMessage>();
+  const order: string[] = [];
+  for (const item of items) {
+    const key = item.server_msg_id || `local:${item.client_msg_id}`;
+    if (!seen.has(key)) order.push(key);
+    seen.set(key, item);
+  }
+  return order.map((key) => seen.get(key) as UiMessage);
 };
 
 const emptyThread = (): Thread => ({
@@ -868,7 +886,9 @@ class ImStore {
 
   private patchThread(cid: string, patch: Partial<Thread>): void {
     const current = this.state.threads[cid] ?? emptyThread();
-    this.set({ threads: { ...this.state.threads, [cid]: { ...current, ...patch } } });
+    const next: Thread = { ...current, ...patch };
+    if (patch.items) next.items = dedupeMessages(patch.items);
+    this.set({ threads: { ...this.state.threads, [cid]: next } });
   }
 
   /** Appends one message, de-duplicated against the *current* thread state.
@@ -1073,9 +1093,32 @@ class ImStore {
 
   // -------------------------------------------------------- message ops ----
 
+  /** Resolves the conversation that owns a message.
+   *
+   * Pushed items may carry an empty conversation_id (the 1901 event is keyed by
+   * conversation but the client stores what arrived), so fall back to the thread
+   * that already holds the message.
+   */
+  private conversationOf(message: UiMessage): Conversation | undefined {
+    const own = message.conversation_id || this.state.activeCid || '';
+    if (own) {
+      const direct = this.conversation(own);
+      if (direct) return direct;
+      // The thread is open but the list has not caught up yet: a minimal shell
+      // is enough for send-like ops that only need conversation_id.
+      if (this.state.threads[own]) return { conversation_id: own, type: own.startsWith('g_') ? 2 : 1 } as Conversation;
+    }
+    for (const [cid, thread] of Object.entries(this.state.threads)) {
+      if (thread.items.some((item) => item.server_msg_id && item.server_msg_id === message.server_msg_id)) {
+        return this.conversation(cid) ?? ({ conversation_id: cid, type: cid.startsWith('g_') ? 2 : 1 } as Conversation);
+      }
+    }
+    return undefined;
+  }
+
   /** 1506: recall one of my messages (server enforces the window). */
   async recallMessage(message: UiMessage): Promise<void> {
-    const conversation = this.conversation(message.conversation_id);
+    const conversation = this.conversationOf(message);
     if (!conversation || !this.client) return;
     try {
       await this.client.request(OP.RECALL, encodeRecallReq({
@@ -1091,7 +1134,7 @@ class ImStore {
 
   /** 1507: edit my own message; content is the JSON text payload. */
   async editMessage(message: UiMessage, content: string): Promise<void> {
-    const conversation = this.conversation(message.conversation_id);
+    const conversation = this.conversationOf(message);
     if (!conversation || !this.client) return;
     try {
       await this.client.request(OP.EDIT, encodeEditMessageReq({
@@ -1108,7 +1151,7 @@ class ImStore {
 
   /** 1508: delete my own message for both sides. */
   async deleteMessage(message: UiMessage): Promise<void> {
-    const conversation = this.conversation(message.conversation_id);
+    const conversation = this.conversationOf(message);
     if (!conversation || !this.client) return;
     try {
       await this.client.request(OP.DELETE, encodeDeleteMessageReq({
@@ -1120,6 +1163,50 @@ class ImStore {
     } catch (err) {
       this.notify(`删除失败：${wrapError(err).display}`, 'error');
     }
+  }
+
+  /** 1515/1516: toggle one emoji reaction on my side (optimistic). */
+  async toggleReaction(message: UiMessage, emoji: string): Promise<void> {
+    const conversation = this.conversationOf(message);
+    if (!conversation || !this.client || !message.server_msg_id) return;
+    const existing = (message.reactions ?? []).find((item) => item.emoji === emoji);
+    const mine = existing?.mine ?? false;
+    this.applyReaction(conversation.conversation_id, message.server_msg_id, emoji, !mine);
+    try {
+      await this.client.request(
+        mine ? OP.REMOVE_REACTION : OP.ADD_REACTION,
+        encodeReactionReq({
+          conversationId: conversation.conversation_id,
+          serverMsgId: message.server_msg_id,
+          emoji,
+        }),
+        decodeOperationRes,
+      );
+    } catch (err) {
+      this.applyReaction(conversation.conversation_id, message.server_msg_id, emoji, mine);
+      this.notify(`表情回应失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** Applies a reaction delta to the local thread (used by the optimistic path). */
+  private applyReaction(cid: string, serverMsgId: string, emoji: string, add: boolean): void {
+    const thread = this.state.threads[cid];
+    if (!thread) return;
+    const items = thread.items.map((item) => {
+      if (item.server_msg_id !== serverMsgId) return item;
+      const list = [...(item.reactions ?? [])];
+      const index = list.findIndex((entry) => entry.emoji === emoji);
+      if (add) {
+        if (index >= 0) list[index] = { ...list[index], count: list[index].count + 1, mine: true };
+        else list.push({ emoji, count: 1, mine: true });
+      } else if (index >= 0) {
+        const next = { ...list[index], count: list[index].count - 1, mine: false };
+        if (next.count <= 0) list.splice(index, 1);
+        else list[index] = next;
+      }
+      return { ...item, reactions: list };
+    });
+    this.patchThread(cid, { items });
   }
 
   /** 1512: keyword search inside one conversation (newest first). */

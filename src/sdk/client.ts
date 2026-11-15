@@ -14,6 +14,11 @@ import {
 } from './messages';
 import type { LoginRes } from './types';
 
+// Dev-only socket counters: two live sockets for one account make the gate kick
+// one of them, which shows up as an endless reconnect fight.
+let socketSeq = 0;
+let liveSockets = 0;
+
 export type ConnectionState =
   | 'idle'
   | 'connecting'
@@ -67,7 +72,7 @@ export const buildSocketUrl = (options: {
   platform?: number;
   sdk?: string;
 }): string => {
-  let origin = options.baseUrl ?? '';
+  let origin = options.baseUrl ?? (import.meta.env.VITE_WS_ORIGIN as string | undefined) ?? '';
   if (!origin && typeof window !== 'undefined' && window.location) {
     origin = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
   }
@@ -80,8 +85,7 @@ export const buildSocketUrl = (options: {
 
 interface Pending {
   resolve: (value: RequestResult<unknown>) => void;
-  reject: (error: ImError) => void;
-  decode?: Decoder<unknown>;
+  reject: (error: ImError) => void;  decode?: Decoder<unknown>;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -129,6 +133,7 @@ export class IMClient {
     return this.dial();
   }
 
+
   private dial(): Promise<LoginRes> {
     return new Promise<LoginRes>((resolve, reject) => {
       this.setState('connecting');
@@ -158,6 +163,7 @@ export class IMClient {
       }
       socket.binaryType = 'arraybuffer';
       this.socket = socket;
+      if (import.meta.env.DEV) console.debug(`[zim] socket#${++socketSeq} created (live=${++liveSockets})`);
 
       socket.addEventListener('error', () => {
         this.setState('error');
@@ -189,6 +195,7 @@ export class IMClient {
       });
 
       socket.addEventListener('close', (event) => {
+        if (import.meta.env.DEV) console.debug(`[zim] socket closed (live=${--liveSockets}) code=${event.code}`);
         this.flushPending(new ImError(0, '连接已断开'));
         this.setState('closed', { code: event.code, reason: event.reason });
         this.socket = null;

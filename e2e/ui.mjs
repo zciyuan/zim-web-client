@@ -221,31 +221,86 @@ const main = async () => {
   await alice.screenshot({ path: path.join(OUT, '05-alice-realtime.png') });
 
   step('alice replies and the bubble is marked sent');
+  // Chrome throttles sockets in background tabs; keep the page under test in
+  // front so a reconnect storm is not mistaken for an app bug.
+  await alice.bringToFront();
   // The dev stack drops WS sessions intermittently (see ZIM-local-blockers), so
   // the send is retried instead of waiting for a stable "open" snapshot.
   let replied = false;
   for (let attempt = 0; attempt < 6 && !replied; attempt += 1) {
     await setValue(alice, 'textarea', '收到，来自 React 客户端');
-    await alice.focus('textarea');
-    await alice.keyboard.press('Enter');
+    // Click the send button: headless Enter does not always reach the composer
+    // when two tabs are open, while the button press is deterministic.
+    await alice.evaluate(() => {
+      const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+        .find((item) => item.textContent === '发送');
+      if (!button) throw new Error('send button missing');
+      button.click();
+    });
     replied = await alice.evaluate((needle) => {
       const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
-        .filter((node) => node.classList.contains('out'));
+        .filter((node) => node.getAttribute('data-mine') === 'true');
       const last = nodes[nodes.length - 1];
       return Boolean(last && last.textContent?.includes(needle) && last.getAttribute('data-state') === 'sent');
     }, '收到，来自 React 客户端');
     if (!replied) await new Promise((resolve) => setTimeout(resolve, 800));
   }
-  assert.ok(replied, 'alice reply never settled to sent');
+  assert.ok(replied, `alice reply never settled to sent: ${JSON.stringify(await alice.evaluate(() => {
+    const state = window.__zim.getSnapshot();
+    const thread = state.activeCid ? state.threads[state.activeCid] : null;
+    const items = thread ? thread.items.slice(-3) : [];
+    return {
+      conn: state.connection,
+      toast: state.toast?.text,
+      active: state.activeCid,
+      items: items.map((item) => ({ state: item.localState, text: item.content.slice(0, 40) })),
+    };
+  }))}`);
+
+  step('reaction toggles on a message');
+  await alice.bringToFront();
+  const clickReaction = (label) => alice.evaluate((wanted) => {
+    const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.getAttribute('data-mine') === 'true');
+    const last = nodes[nodes.length - 1];
+    const button = last && [...last.querySelectorAll('button')].find((item) => item.getAttribute('aria-label') === wanted);
+    if (!button) throw new Error(`reaction button ${wanted} missing`);
+    button.click();
+  }, label);
+  const reactionChipCount = () => alice.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.getAttribute('data-mine') === 'true');
+    const last = nodes[nodes.length - 1];
+    if (!last) return 0;
+    return [...last.querySelectorAll('button')].filter((item) => /\d/.test(item.textContent ?? '') && (item.textContent ?? '').includes('👍')).length;
+  });
+
+  await clickReaction('回应 👍');
+  let chips = 0;
+  for (let attempt = 0; attempt < 30 && chips === 0; attempt += 1) {
+    chips = await reactionChipCount();
+    if (chips === 0) await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  assert.ok(chips > 0, 'reaction chip never appeared');
+  await alice.screenshot({ path: path.join(OUT, '14-reactions.png') });
+
+  await clickReaction('回应 👍');
+  let cleared = false;
+  for (let attempt = 0; attempt < 30 && !cleared; attempt += 1) {
+    cleared = (await reactionChipCount()) === 0;
+    if (!cleared) await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  assert.ok(cleared, 'reaction chip did not clear');
 
   step('edit, delete and search messages');
+  await alice.bringToFront();
   alice.on('dialog', async (dialog) => {
     if (dialog.type() === 'prompt') await dialog.accept('编辑后的消息');
     else await dialog.accept();
   });
   const clickOwnAction = (label) => alice.evaluate((wanted) => {
     const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
-      .filter((node) => node.classList.contains('out'));
+      .filter((node) => node.getAttribute('data-mine') === 'true');
     const last = nodes[nodes.length - 1];
     const button = last && [...last.querySelectorAll('button')].find((item) => item.textContent === wanted);
     if (!button) throw new Error(`message action ${wanted} missing`);
@@ -273,11 +328,15 @@ const main = async () => {
   });
   await alice.waitForSelector('[aria-label="聊天"] input', { timeout: 10_000 });
   await setValue(alice, '[aria-label="聊天"] input', 'React 实时消息');
-  await alice.focus('[aria-label="聊天"] input');
-  await alice.keyboard.press('Enter');
+  await alice.evaluate(() => {
+    const buttons = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .filter((item) => item.textContent === '搜索');
+    const submit = buttons[buttons.length - 1];
+    if (!submit) throw new Error('search submit missing');
+    submit.click();
+  });
   await alice.waitForFunction(
-    () => document.querySelector('[aria-label="聊天"]')?.textContent?.includes('没有匹配的消息') === false
-      && document.querySelectorAll('[aria-label="聊天"] .truncate').length > 0,
+    () => (document.querySelector('[data-search-results]')?.textContent ?? '').includes('React 实时消息'),
     { timeout: 20_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '13-search.png') });
@@ -291,8 +350,12 @@ const main = async () => {
   await jsClick(alice, '[aria-label="😀"]');
   const draft = await alice.$eval('textarea', (el) => el.value);
   assert.ok(draft.includes('😀'), 'emoji should land in the composer');
-  await alice.focus('textarea');
-  await alice.keyboard.press('Enter');
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    if (!button) throw new Error('send button missing');
+    button.click();
+  });
   await alice.waitForFunction(
     (needle) => document.querySelector('[aria-label="聊天"]')?.textContent?.includes(needle),
     { timeout: 15_000 },
@@ -307,6 +370,7 @@ const main = async () => {
   await alice.screenshot({ path: path.join(OUT, '07-image.png') });
 
   step('group tab opens a group thread');
+  await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
   await alice.waitForFunction(
     () => document.querySelector('[aria-label="列表"] h2')?.textContent?.includes('群聊'),

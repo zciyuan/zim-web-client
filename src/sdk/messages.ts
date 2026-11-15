@@ -8,6 +8,7 @@ import type {
   LoginRes,
   MessageItem,
   OnlineDevice,
+  Reaction,
   PullBySeqRes,
   SendRes,
   SyncState,
@@ -21,6 +22,8 @@ export const OP = {
   SEND_GROUP: 1502,
   READ_RECEIPT: 1505,
   RECALL: 1506,
+  ADD_REACTION: 1515,
+  REMOVE_REACTION: 1516,
   EDIT: 1507,
   DELETE: 1508,
   PULL_BY_SEQ: 1511,
@@ -159,8 +162,19 @@ export const decodeLoginRes = (bytes: Uint8Array): LoginRes => {
 
 // --------------------------------------------------------------- messages ---
 
-export const decodeMessageItem = (bytes: Uint8Array): MessageItem => {
-  const item: MessageItem = {
+/** Reaction { string emoji=1; int32 count=2; bool mine=3; } */
+export const decodeReaction = (bytes: Uint8Array): Reaction => {
+  const item: Reaction = { emoji: '', count: 0, mine: false };
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) item.emoji = reader.string();
+    else if (field === 2) item.count = reader.int32();
+    else if (field === 3) item.mine = reader.bool();
+    else reader.skip(wire);
+  });
+  return item;
+};
+
+export const decodeMessageItem = (bytes: Uint8Array): MessageItem => {  const item: MessageItem = {
     server_msg_id: '', client_msg_id: '', conversation_id: '', seq: '0',
     send_id: '0', recv_id: '0', group_id: '0', msg_type: 1, content: '',
     at_user_ids: [], send_time: '0', status: 0,
@@ -179,6 +193,7 @@ export const decodeMessageItem = (bytes: Uint8Array): MessageItem => {
       case 10: item.at_user_ids.push(reader.string()); break;
       case 11: item.send_time = reader.int64(); break;
       case 12: item.status = reader.int32(); break;
+      case 13: (item.reactions ??= []).push(decodeReaction(reader.bytes())); break;
       default: reader.skip(wire);
     }
   });
@@ -299,6 +314,19 @@ export const encodeSearchMessageReq = (req: {
     .string(1, req.conversationId)
     .string(2, req.keyword)
     .int32(3, req.limit ?? 30)
+    .finish();
+
+/** 1515 AddReaction / 1516 RemoveReaction
+ *  { conversation_id=1; server_msg_id=2; emoji=3; } */
+export const encodeReactionReq = (req: {
+  conversationId: string;
+  serverMsgId: string;
+  emoji: string;
+}): Uint8Array =>
+  new Writer()
+    .string(1, req.conversationId)
+    .string(2, req.serverMsgId)
+    .string(3, req.emoji)
     .finish();
 
 export const decodeSearchMessageRes = (bytes: Uint8Array): MessageItem[] => {

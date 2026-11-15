@@ -6,6 +6,8 @@ import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
 import { formatClock, imageOf, messageText } from '../app/format';
 
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
+
 function Bubble({
   message,
   mine,
@@ -46,6 +48,7 @@ function Bubble({
     <div
       className={`message-enter group flex max-w-[82%] gap-2 ${mine ? 'flex-row-reverse self-end' : 'self-start'}`}
       data-state={state}
+      data-mine={mine ? 'true' : 'false'}
     >
       <Avatar name={senderName} seed={message.send_id} size={30} />
       <div className="min-w-0">
@@ -115,7 +118,38 @@ function Bubble({
           >
             复制
           </button>
+          <span className="flex items-center gap-1">
+            {REACTION_EMOJIS.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                aria-label={`回应 ${emoji}`}
+                className="hover:scale-110"
+                onClick={() => void imStore.toggleReaction(message, emoji)}
+              >
+                {emoji}
+              </button>
+            ))}
+          </span>
         </div>
+        {(message.reactions ?? []).length > 0 ? (
+          <div className={`mt-1 flex flex-wrap gap-1 ${mine ? 'justify-end' : ''}`}>
+            {(message.reactions ?? []).map((reaction) => (
+              <button
+                key={reaction.emoji}
+                type="button"
+                onClick={() => void imStore.toggleReaction(message, reaction.emoji)}
+                className={`rounded-full border px-1.5 py-0.5 text-[11px] transition ${
+                  reaction.mine
+                    ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-950'
+                    : 'border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                }`}
+              >
+                {reaction.emoji} {reaction.count}
+              </button>
+            ))}
+          </div>
+        ) : null}
       </div>
     </div>
   );

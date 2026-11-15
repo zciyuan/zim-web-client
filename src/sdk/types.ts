@@ -41,6 +41,7 @@ export interface MessageItem {
   at_user_ids: string[];
   send_time: Int64String;
   status: number;
+  reactions?: Reaction[];
 }
 
 export interface SendRes {
@@ -90,6 +91,13 @@ export interface Friend {
 }
 
 /** Friend request row (inbound or outbound). */
+/** One emoji aggregation on a message. */
+export interface Reaction {
+  emoji: string;
+  count: number;
+  mine?: boolean;
+}
+
 export interface FriendRequestItem {
   id?: string;
   from_id: string;
