@@ -31,3 +31,21 @@ export const measureImage = async (file: Blob): Promise<ImageSize> => {
     img.src = url;
   });
 };
+
+/** Reads the duration of an audio/video blob without uploading it. */
+export const measureMedia = (file: Blob, tag: "audio" | "video"): Promise<number> =>
+  new Promise<number>((resolve) => {
+    const url = URL.createObjectURL(file);
+    const element = document.createElement(tag);
+    element.preload = "metadata";
+    element.onloadedmetadata = () => {
+      const seconds = Number.isFinite(element.duration) ? element.duration : 0;
+      URL.revokeObjectURL(url);
+      resolve(Math.round(seconds * 1000));
+    };
+    element.onerror = () => {
+      URL.revokeObjectURL(url);
+      resolve(0);
+    };
+    element.src = url;
+  });

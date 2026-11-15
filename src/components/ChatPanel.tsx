@@ -4,6 +4,7 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
+import { attachmentOf, formatBytes, formatDuration } from '../app/format';
 import { formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
@@ -20,6 +21,7 @@ function Bubble({
   senderName: string;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
+  const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
   const { text, system } = messageText(message.content, message.msg_type);
   const state = message.localState ?? 'sent';
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
@@ -78,6 +80,41 @@ function Bubble({
               </span>
             ) : null}
           </button>
+        ) : attachment ? (
+          <div
+            className={`overflow-hidden rounded-2xl border ${
+              mine ? 'border-indigo-500 bg-indigo-600/10' : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800'
+            } ${state === 'sending' ? 'opacity-60' : ''}`}
+          >
+            {message.msg_type === 3 ? (
+              <div className="flex items-center gap-2 px-3 py-2">
+                <span className="text-lg">🎤</span>
+                <audio controls preload="metadata" src={imStore.assetUrl(attachment.url)} className="h-8 max-w-[220px]" />
+                <span className="text-[11px] text-slate-400">{formatDuration(attachment.duration)}</span>
+              </div>
+            ) : message.msg_type === 4 ? (
+              <video
+                controls
+                preload="metadata"
+                src={imStore.assetUrl(attachment.url)}
+                className="max-h-[260px] max-w-[320px] rounded-xl"
+              />
+            ) : (
+              <a
+                href={imStore.assetUrl(attachment.url)}
+                download={attachment.name || undefined}
+                target="_blank"
+                rel="noreferrer"
+                className="flex max-w-[280px] items-center gap-2 px-3 py-2 hover:opacity-90"
+              >
+                <span className="text-xl">📎</span>
+                <span className="min-w-0">
+                  <span className="block truncate text-[13px] font-medium">{attachment.name || '附件'}</span>
+                  <span className="block text-[11px] text-slate-400">{formatBytes(attachment.size)}</span>
+                </span>
+              </a>
+            )}
+          </div>
         ) : (
           <div
             className={`whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-sm ${
@@ -201,7 +238,9 @@ function Composer({ disabled }: { disabled: boolean }) {
   const pickFile = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = '';
-    if (file) void imStore.sendImage(file);
+    if (!file) return;
+    if (file.type.startsWith('image/')) void imStore.sendImage(file);
+    else void imStore.sendAttachment(file);
   };
 
   const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -233,12 +272,19 @@ function Composer({ disabled }: { disabled: boolean }) {
           type="button"
           onClick={() => fileRef.current?.click()}
           className="grid h-9 w-9 place-items-center rounded-xl text-lg transition hover:bg-slate-100 dark:hover:bg-slate-800"
-          title="发送图片"
-          aria-label="发送图片"
+          title="发送图片或附件"
+          aria-label="发送附件"
         >
           🖼️
         </button>
-        <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={pickFile} aria-label="选择图片" />
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/*,audio/*,video/*,.pdf,.zip,.txt,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.csv"
+          className="hidden"
+          onChange={pickFile}
+          aria-label="选择附件"
+        />
       </div>
 
       <textarea

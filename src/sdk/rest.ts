@@ -164,7 +164,14 @@ export class IMHttp {
   }
 
   /** ZIM-02 §3.4: token -> presigned PUT -> immutable download URL. */
-  async uploadFile(file: { blob: Blob; name: string; mime: string }): Promise<{ url: string; objectKey: string; size: number }> {
+  async uploadFile(file: {
+    blob: Blob;
+    name: string;
+    mime: string;
+    kind?: 'image' | 'voice' | 'video' | 'file';
+  }): Promise<{ url: string; objectKey: string; size: number }> {
+    const kind = file.kind
+      ?? (file.mime.startsWith('image/') ? 'image' : file.mime.startsWith('audio/') ? 'voice' : 'file');
     const intent = await this.send<{
       object_key: string;
       upload_url: string;
@@ -173,7 +180,7 @@ export class IMHttp {
       download_url: string;
     }>('POST', '/v1/upload/token', {
       body: {
-        file_type: file.mime.startsWith('image/') ? 'image' : 'file',
+        file_type: kind,
         file_name: file.name,
         file_size: file.blob.size,
         mime: file.mime,

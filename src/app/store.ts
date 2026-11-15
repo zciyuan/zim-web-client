@@ -8,7 +8,7 @@ import { useSyncExternalStore } from 'react';
 import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
-import { measureImage } from './image';
+import { measureImage, measureMedia } from './image';
 import {
   OP,
   decodeMessageItem,
@@ -973,6 +973,50 @@ class ImStore {
   }
 
   /** Uploads an image then sends it as msg_type 2. */
+  /** Uploads one attachment and sends it as msg_type 3/4/5. */
+  async sendAttachment(file: File): Promise<void> {
+    const conversation = this.conversation(this.state.activeCid);
+    if (!conversation || !this.client) return;
+    const mime = file.type || 'application/octet-stream';
+    const kind: 'image' | 'voice' | 'video' | 'file' = mime.startsWith('image/')
+      ? 'image'
+      : mime.startsWith('audio/')
+        ? 'voice'
+        : mime.startsWith('video/')
+          ? 'video'
+          : 'file';
+    const caps = { image: 5, voice: 10, video: 50, file: 20 } as const;
+    if (file.size > caps[kind] * 1024 * 1024) {
+      this.notify(`附件不能超过 ${caps[kind]} MB`, 'error');
+      return;
+    }
+
+    this.notify(kind === 'image' ? '图片上传中…' : '附件上传中…');
+    try {
+      const uploaded = await this.rest.uploadFile({
+        blob: file,
+        name: file.name || 'attachment',
+        mime,
+        kind,
+      });
+      if (kind === 'image') {
+        await this.sendImage(file);
+        return;
+      }
+      const duration = await measureMedia(file, kind === 'voice' ? 'audio' : 'video');
+      const msgType = kind === 'voice' ? 3 : kind === 'video' ? 4 : 5;
+      const content = kind === 'voice'
+        ? { url: uploaded.url, duration_ms: duration, size: uploaded.size, mime, name: file.name }
+        : kind === 'video'
+          ? { url: uploaded.url, duration_ms: duration, size: uploaded.size, mime, name: file.name }
+          : { url: uploaded.url, name: file.name, size: uploaded.size, mime };
+      await this.sendContent(msgType, JSON.stringify(content));
+      this.notify(kind === 'voice' ? '语音已发送' : kind === 'video' ? '视频已发送' : '文件已发送');
+    } catch (err) {
+      this.notify(`附件发送失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
   async sendImage(file: File): Promise<void> {
     const conversation = this.conversation(this.state.activeCid);
     if (!conversation || !this.client) return;

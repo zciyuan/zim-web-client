@@ -42,6 +42,28 @@ export const imageOf = (raw: string): { url: string; width: number; height: numb
   return { url: parsed.url, width, height };
 };
 
+/** Attachment payload of msg_type 3/4/5. */
+export interface AttachmentInfo {
+  url: string;
+  name: string;
+  size: number;
+  mime: string;
+  duration: number;
+}
+
+/** Reads the attachment of a voice/video/file message. */
+export const attachmentOf = (raw: string): AttachmentInfo | null => {
+  const parsed = parseContent(raw);
+  if (!parsed || typeof parsed.url !== 'string' || parsed.url === '') return null;
+  return {
+    url: parsed.url,
+    name: typeof parsed.name === 'string' ? parsed.name : '',
+    size: typeof parsed.size === 'number' ? parsed.size : 0,
+    mime: typeof parsed.mime === 'string' ? parsed.mime : '',
+    duration: typeof parsed.duration_ms === 'number' ? parsed.duration_ms : 0,
+  };
+};
+
 /** Text to show inside a bubble. */
 export const messageText = (raw: string, msgType: number): { text: string; system: boolean } => {
   if (msgType >= 20 && msgType <= 22) {
@@ -81,3 +103,19 @@ const ROLE_LABELS: Record<number, string> = { 0: '成员', 1: '管理员', 2: '�
 
 export const roleLabel = (role?: number): string =>
   role === undefined ? '' : ROLE_LABELS[role] ?? `角色 ${role}`;
+
+/** Human-readable byte size (B/KB/MB). */
+export const formatBytes = (bytes: number): string => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+/** Media duration in mm:ss (0 -> 00:00). */
+export const formatDuration = (ms: number): string => {
+  const total = Math.max(0, Math.round((Number.isFinite(ms) ? ms : 0) / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+};

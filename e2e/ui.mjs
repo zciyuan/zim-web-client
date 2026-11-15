@@ -369,6 +369,15 @@ const main = async () => {
   await alice.waitForSelector('[aria-label="聊天"] img[alt="图片消息"]', { timeout: 30_000 });
   await alice.screenshot({ path: path.join(OUT, '07-image.png') });
 
+  step('file attachment produces a file card');
+  const attachmentPath = path.join(OUT, 'e2e-attachment.txt');
+  fs.mkdirSync(OUT, { recursive: true });
+  fs.writeFileSync(attachmentPath, `zim e2e attachment ${Date.now()}`);
+  const attachInput = await alice.$('input[type="file"]');
+  assert.ok(attachInput, 'attachment picker input is missing');
+  await attachInput.uploadFile(attachmentPath);
+  await alice.waitForSelector('[aria-label="聊天"] a[download]', { timeout: 30_000 });
+  await alice.screenshot({ path: path.join(OUT, '15-attachment.png') });
   step('group tab opens a group thread');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
