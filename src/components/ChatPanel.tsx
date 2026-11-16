@@ -425,6 +425,19 @@ export function ChatPanel() {
   const thread = state.activeCid ? state.threads[state.activeCid] : undefined;
   const isGroup = conversation?.type === 2;
 
+  // Read indicator for direct chats: compare my last message seq with the
+  // peer's watermark delivered by 1906.
+  const readState = (() => {
+    if (!conversation || isGroup) return null;
+    const items = thread?.items ?? [];
+    const mine = [...items].reverse().find(
+      (item) => String(item.send_id) === String(state.me?.uid ?? '') && item.server_msg_id,
+    );
+    if (!mine) return null;
+    const peerSeq = state.peerReads[conversation.conversation_id] ?? 0;
+    return { read: peerSeq >= Number(mine.seq) };
+  })();
+
   const runSearch = async () => {
     if (!conversation || !keyword.trim()) return;
     setSearching(true);
@@ -611,6 +624,14 @@ export function ChatPanel() {
               />
             );
           })}
+          {!isGroup && readState ? (
+            <p
+              data-read-status={readState.read ? 'read' : 'unread'}
+              className="self-end pr-1 text-[11px] text-slate-400"
+            >
+              {readState.read ? '已读' : '未读'}
+            </p>
+          ) : null}
         </div>
       </div>
 

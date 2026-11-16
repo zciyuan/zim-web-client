@@ -738,6 +738,41 @@ const main = async () => {
   );
   await alice.screenshot({ path: path.join(OUT, '22-merge.png') });
 
+  step('read receipt reaches the sender');
+  // Move alice away so bob's next message stays unread for her.
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await bob.bringToFront();
+  await jsClick(bob, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(bob, 'Alice', 'Alice', '[aria-label="聊天"] header');
+  const readText = `已读测试 ${Date.now()}`;
+  await setValue(bob, 'textarea', readText);
+  await bob.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    if (!button) throw new Error('send button missing');
+    button.click();
+  });
+  await bob.waitForFunction(
+    (needle) => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => node.getAttribute('data-mine') === 'true' && (node.textContent ?? '').includes(needle)),
+    { timeout: 20_000 },
+    readText,
+  );
+  await bob.waitForFunction(
+    () => document.querySelector('[data-read-status]')?.getAttribute('data-read-status') === 'unread',
+    { timeout: 15_000 },
+  );
+  // Alice opens the direct chat: her 1505 pushes 1906 back to bob.
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  await bob.waitForFunction(
+    () => document.querySelector('[data-read-status]')?.getAttribute('data-read-status') === 'read',
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '23-read.png') });
+
   step('add friend over the WS channel (1201)');
   const wsSuffix = String(Date.now() % 1_000_000);
   const wsFriend = await fetch(`${BASE}/v1/auth/register`, {

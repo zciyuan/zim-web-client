@@ -44,6 +44,7 @@ export const OP = {
   ROOM_TOKEN: 1806,
   PUSH_MSG: 1901,
   PUSH_GROUP_EVENT: 1904,
+  PUSH_READ_SYNC: 1906,
   PUSH_KICK: 1902,
 } as const;
 
@@ -438,4 +439,21 @@ export const decodeMergeRes = (bytes: Uint8Array): SendRes => {
     else reader.skip(wire);
   });
   return result;
+};
+/** 1906 ReadSyncPush { conversation_id=1; uid=2; read_seq=3; } */
+export const decodeReadSyncPush = (bytes: Uint8Array): {
+  conversation_id: string;
+  uid: string;
+  read_seq: string;
+} => {
+  let conversationId = '';
+  let uid = '0';
+  let readSeq = '0';
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) conversationId = reader.string();
+    else if (field === 2) uid = reader.int64();
+    else if (field === 3) readSeq = reader.int64();
+    else reader.skip(wire);
+  });
+  return { conversation_id: conversationId, uid, read_seq: readSeq };
 };

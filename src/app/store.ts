@@ -16,6 +16,7 @@ import {
   decodeMyGroupsRes,
   decodeMergeRes,
   decodeQuoteRes,
+  decodeReadSyncPush,
   decodeSearchMessageRes,
   decodeOperationRes,
   decodeReadReceiptRes,
@@ -131,6 +132,8 @@ export interface ImState {
   status: AppStatus;
   authError: string;
   connection: ConnectionState;
+  /** direct chats: how far the peer has read (seq, from 1906) */
+  peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
   call: CallStatus;
   /** last RTC failure, kept for diagnostics */
@@ -163,6 +166,7 @@ const initialState: ImState = {
   status: 'idle',
   authError: '',
   connection: 'idle',
+  peerReads: {},
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -1687,6 +1691,15 @@ class ImStore {
     if (import.meta.env.DEV && event.opcode !== OP.PUSH_MSG) console.debug(`[zim] push opcode=${event.opcode} len=${event.payload.length}`);
     if (event.opcode === OP.CALL_ANSWER) {
       this.handleCallPush(event.payload);
+      return;
+    }
+    if (event.opcode === OP.PUSH_READ_SYNC) {
+      const update = decodeReadSyncPush(event.payload);
+      if (update.conversation_id) {
+        this.set({
+          peerReads: { ...this.state.peerReads, [update.conversation_id]: Number(update.read_seq) },
+        });
+      }
       return;
     }
     if (event.opcode === OP.PUSH_GROUP_EVENT) {
