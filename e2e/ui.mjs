@@ -502,6 +502,37 @@ const main = async () => {
   }
   await alice.screenshot({ path: path.join(OUT, '10-group-create.png') });
 
+  step('group rename reaches members over 1904');
+  // Create a dedicated group through the store so the id comes straight from the
+  // create response (REST ids are JSON numbers and lose precision in the client).
+  const eventGroup = await alice.evaluate(async () => {
+    const state = window.__zim.getSnapshot();
+    const bobUid = String(state.friends[0]?.friend_id ?? '');
+    const name = `E2E 事件群 ${Date.now() % 10000}`;
+    const gid = await window.__zim.createGroup(name, bobUid ? [bobUid] : []);
+    return { gid: String(gid), name };
+  });
+  assert.ok(eventGroup.gid, 'group create returned no id');
+  const renamed = `E2E 事件群改名 ${Date.now() % 10000}`;
+  await alice.bringToFront();
+  const renameResult = await alice.evaluate(async ([gid, name]) => {
+    try {
+      await window.__zim.updateGroupInfo(gid, { name });
+      return 'ok';
+    } catch (err) {
+      return String(err && err.message ? err.message : err);
+    }
+  }, [eventGroup.gid, renamed]);
+  assert.equal(renameResult, 'ok', `group rename failed: ${renameResult}`);
+  // Bob is a member: the 1904 push must refresh his group list without a reload.
+  // Compare by name: REST group ids are JSON numbers and lose precision client-side.
+  await bob.waitForFunction(
+    (name) => window.__zim.getSnapshot().groups.some((group) => group.name === name),
+    { timeout: 20_000 },
+    renamed,
+  );
+  await bob.screenshot({ path: path.join(OUT, '21-group-event.png') });
+
   step('incremental sync converges without a full reload');
   const syncResult = await alice.evaluate(async () => window.__zim.runSync());
   assert.equal(syncResult.full, false, 'sync should be incremental after login');

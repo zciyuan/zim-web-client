@@ -42,6 +42,7 @@ export const OP = {
   CALL_STATE: 1807,
   ROOM_TOKEN: 1806,
   PUSH_MSG: 1901,
+  PUSH_GROUP_EVENT: 1904,
   PUSH_KICK: 1902,
 } as const;
 

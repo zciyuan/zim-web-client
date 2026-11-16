@@ -239,3 +239,39 @@ export const decodeSearchGroupRes = (bytes: Uint8Array): GroupSummary[] => {
 /** 1317 GroupNotify { string group_id=1; int32 recv_opt=2; } */
 export const encodeGroupNotifyReq = (groupId: string, recvOpt: number): Uint8Array =>
   new Writer().string(1, groupId).int32(2, recvOpt).finish();
+
+/** GroupEvent pushed on op:1904 (internal/protocol/group/group_event.proto). */
+export interface GroupEvent {
+  group_id: string;
+  kind: number;
+  actor_id: string;
+  target_id: string;
+  name: string;
+  at: string;
+}
+
+export const GROUP_EVENT = {
+  MEMBER_JOINED: 1,
+  MEMBER_LEFT: 2,
+  MEMBER_KICKED: 3,
+  UPDATED: 4,
+  OWNER_TRANSFERRED: 5,
+  ADMIN_CHANGED: 6,
+  DISMISSED: 7,
+  MUTED: 8,
+  APPLY: 9,
+} as const;
+
+export const decodeGroupEvent = (bytes: Uint8Array): GroupEvent => {
+  const event: GroupEvent = { group_id: '0', kind: 0, actor_id: '0', target_id: '0', name: '', at: '0' };
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) event.group_id = reader.int64();
+    else if (field === 2) event.kind = reader.int32();
+    else if (field === 3) event.actor_id = reader.int64();
+    else if (field === 4) event.target_id = reader.int64();
+    else if (field === 5) event.name = reader.string();
+    else if (field === 6) event.at = reader.int64();
+    else reader.skip(wire);
+  });
+  return event;
+};

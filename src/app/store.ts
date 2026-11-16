@@ -48,6 +48,7 @@ import {
   encodeRoomTokenReq,
   type CallAnswerPush,
 } from '../sdk/rtc';
+import { GROUP_EVENT, decodeGroupEvent, type GroupEvent } from '../sdk/groups';
 import { callSession } from './call';
 import {
   decodeRelationOperationRes,
@@ -699,6 +700,52 @@ class ImStore {
     } catch {
       // offline or transient: the next tick retries
     }
+  }
+
+  // ----------------------------------------------------------------- group --
+
+  /** Server pushed a group change (1904): refresh the group view. */
+  private handleGroupEvent(payload: Uint8Array): void {
+    let event: GroupEvent;
+    try {
+      event = decodeGroupEvent(payload);
+    } catch {
+      return;
+    }
+    if (import.meta.env.DEV) console.debug(`[zim] group event kind=${event.kind} gid=${event.group_id} name=${event.name}`);
+    const gid = String(event.group_id);
+    const selfUid = String(this.state.me?.uid ?? '');
+    const isActive = String(this.state.conversations.find((item) => item.conversation_id === this.state.activeCid)?.group_id ?? '') === gid;
+
+    switch (event.kind) {
+      case GROUP_EVENT.DISMISSED:
+        this.notify('群聊已解散');
+        if (isActive) this.set({ activeCid: null });
+        break;
+      case GROUP_EVENT.MEMBER_KICKED:
+        if (String(event.target_id) === selfUid) {
+          this.notify('你已被移出该群聊');
+          if (isActive) this.set({ activeCid: null });
+        } else {
+          this.notify('群成员发生变化');
+        }
+        break;
+      case GROUP_EVENT.MEMBER_JOINED:
+      case GROUP_EVENT.MEMBER_LEFT:
+        this.notify(event.kind === GROUP_EVENT.MEMBER_JOINED ? '有新成员加入群聊' : '有成员退出群聊');
+        break;
+      case GROUP_EVENT.UPDATED:
+        this.notify('群资料已更新');
+        break;
+      case GROUP_EVENT.OWNER_TRANSFERRED:
+        this.notify('群主已变更');
+        break;
+      default:
+        break;
+    }
+    // Refresh groups and conversations so names/members match the server.
+    void this.refreshGroups();
+    void this.refreshConversations();
   }
 
   /** Reloads friends, pending requests and the blacklist together. */
@@ -1607,6 +1654,10 @@ class ImStore {
     if (import.meta.env.DEV && event.opcode !== OP.PUSH_MSG) console.debug(`[zim] push opcode=${event.opcode} len=${event.payload.length}`);
     if (event.opcode === OP.CALL_ANSWER) {
       this.handleCallPush(event.payload);
+      return;
+    }
+    if (event.opcode === OP.PUSH_GROUP_EVENT) {
+      this.handleGroupEvent(event.payload);
       return;
     }
     if (event.opcode === OP.CALL_HANGUP || event.opcode === OP.CALL_CANCEL) {
