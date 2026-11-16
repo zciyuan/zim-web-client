@@ -8,7 +8,7 @@ import { useSyncExternalStore } from 'react';
 import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
-import { messageText } from './format';
+import { messagePreview, messageText } from './format';
 import { measureImage, measureMedia } from './image';
 import {
   OP,
@@ -137,6 +137,8 @@ export interface ImState {
   connection: ConnectionState;
   /** conversation id -> who is typing and until when (ms) */
   typing: Record<string, { uid: string; until: number }>;
+  /** desktop notifications enabled and permitted */
+  notifications: boolean;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -173,6 +175,7 @@ const initialState: ImState = {
   connection: 'idle',
   typing: {},
   peerReads: {},
+  notifications: typeof localStorage !== 'undefined' && localStorage.getItem('zim.notifications') === '1',
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -256,6 +259,8 @@ export interface CallStatus {
   joinedElsewhere: boolean;
   /** group calls: identities currently in the SFU room */
   participants: string[];
+  /** group calls: identities currently speaking */
+  speaking: string[];
   peerId: string;
   peerName: string;
   room: string;
@@ -267,7 +272,7 @@ export interface CallStatus {
 
 function emptyCall(): CallStatus {
   return {
-    phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [],
+    phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [], speaking: [],
     peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
   };
 }
@@ -1849,6 +1854,63 @@ class ImStore {
       await this.markRead(cid);
     } else if (String(item.send_id) !== String(this.state.me?.uid ?? '')) {
       this.patchConversation(cid, { unread: Number(this.conversation(cid)?.unread ?? 0) + 1 });
+      this.showDesktopNotification(cid, item);
+    }
+  }
+
+  /** True when the browser granted desktop notifications. */
+  get canNotify(): boolean {
+    return typeof Notification !== 'undefined' && Notification.permission === 'granted';
+  }
+
+  /** Asks for notification permission (must be called from a user gesture). */
+  async enableNotifications(): Promise<void> {
+    if (typeof Notification === 'undefined') {
+      this.notify('当前浏览器不支持桌面通知', 'error');
+      return;
+    }
+    if (Notification.permission === 'granted') {
+      this.set({ notifications: true });
+      this.persistNotifications(true);
+      this.notify('桌面通知已开启');
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    this.set({ notifications: permission === 'granted' });
+    this.notify(permission === 'granted' ? '桌面通知已开启' : '桌面通知被拒绝，可在浏览器设置中放开');
+  }
+
+  /** Turns desktop notifications off again (permission stays granted). */
+  disableNotifications(): void {
+    this.set({ notifications: false });
+    this.persistNotifications(false);
+    this.notify('桌面通知已关闭');
+  }
+
+  private persistNotifications(enabled: boolean): void {
+    try {
+      localStorage.setItem('zim.notifications', enabled ? '1' : '0');
+    } catch {
+      // private mode: keep the in-memory flag only
+    }
+  }
+
+  /** Shows a system notification for a background message. */
+  private showDesktopNotification(cid: string, item: MessageItem): void {
+    if (!this.state.notifications || !this.canNotify) return;
+    if (document.visibilityState === 'visible') return;
+    const conversation = this.conversation(cid);
+    const title = conversation?.type === 2 ? this.groupName(String(conversation.group_id)) : this.senderName(item.send_id);
+    const body = messagePreview(item.content, item.msg_type);
+    try {
+      const notification = new Notification(title, { body, tag: cid, silent: false });
+      notification.onclick = () => {
+        window.focus();
+        void this.openConversation(cid);
+        notification.close();
+      };
+    } catch {
+      // Notification construction can throw when the page is not focused.
     }
   }
 
@@ -1875,6 +1937,7 @@ class ImStore {
             targetType: update.target_type === 2 ? 2 : 1,
             joinedElsewhere: false,
             participants: [],
+            speaking: [],
             peerId: update.from_uid,
             peerName: update.from_nickname || `用户 ${update.from_uid}`,
             room: update.room,
@@ -1950,7 +2013,8 @@ class ImStore {
         media,
         targetType,
         joinedElsewhere: false,
-        participants: [],
+        participants: this.state.me ? [String(this.state.me.uid)] : [],
+        speaking: [],
         peerId,
         peerName: peer,
         room: '',
@@ -2090,6 +2154,12 @@ class ImStore {
     const { token, sfu_url: sfuUrl } = res.payload;
     if (import.meta.env.DEV) console.debug(`[zim] call room token ok sfu=${sfuUrl} token=${token ? 'yes' : 'no'}`);
     if (!token || !sfuUrl) throw new Error('SFU 未就绪');
+    callSession.onTrack({
+      onSpeakers: (uids) => {
+        if (this.state.call.callId !== callId) return;
+        this.set({ call: { ...this.state.call, speaking: uids } });
+      },
+    });
     await callSession.connect(sfuUrl, token, video);
     if (import.meta.env.DEV) console.debug('[zim] call media connected');
   }
@@ -2098,7 +2168,7 @@ class ImStore {
     await callSession.end().catch(() => undefined);
     this.set({
       call: {
-        phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [],
+        phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [], speaking: [],
         peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
       },
     });

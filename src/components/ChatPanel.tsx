@@ -18,6 +18,7 @@ function Bubble({
   selectable,
   selected,
   onSelect,
+  onPreviewImage,
 }: {
   message: UiMessage;
   mine: boolean;
@@ -27,6 +28,7 @@ function Bubble({
   selectable?: boolean;
   selected?: boolean;
   onSelect?: () => void;
+  onPreviewImage?: (url: string) => void;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
@@ -40,7 +42,11 @@ function Bubble({
   const [draft, setDraft] = useState('');
 
   const openImage = () => {
-    if (image) window.open(imStore.assetUrl(image.url), '_blank', 'noopener');
+    if (!image) return;
+    const url = imStore.assetUrl(image.url);
+    // Prefer the in-app lightbox; fall back to a new tab when unavailable.
+    if (onPreviewImage) onPreviewImage(url);
+    else window.open(url, '_blank', 'noopener');
   };
 
   // Inline editor: native window.prompt is unreliable in embedded/headless
@@ -81,6 +87,7 @@ function Bubble({
         {image ? (
           <button
             type="button"
+            data-image-bubble="true"
             onClick={openImage}
             className={`block overflow-hidden rounded-2xl border p-1 transition hover:opacity-90 ${
               mine ? 'border-indigo-500 bg-indigo-600/10' : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800'
@@ -417,6 +424,17 @@ export function ChatPanel() {
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [mergePending, setMergePending] = useState(false);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+
+  // Escape closes the image lightbox (keyboard access parity with the X button).
+  useEffect(() => {
+    if (!previewImage) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setPreviewImage(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewImage]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const conversation = useMemo(
@@ -620,6 +638,7 @@ export function ChatPanel() {
                 showSender={Boolean(isGroup)}
                 senderName={imStore.senderName(message.send_id)}
                 onForward={setForwardTarget}
+                onPreviewImage={setPreviewImage}
                 selectable={selectMode}
                 selected={selectedIds.includes(message.server_msg_id)}
                 onSelect={() => {
@@ -724,6 +743,31 @@ export function ChatPanel() {
           })}
         </div>
       </dialog>
+
+      {previewImage ? (
+        <div
+          role="dialog"
+          aria-label="图片预览"
+          data-image-preview="true"
+          onClick={() => setPreviewImage(null)}
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/90 p-6 backdrop-blur"
+        >
+          <img
+            src={previewImage}
+            alt="预览"
+            className="max-h-full max-w-full rounded-xl object-contain shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          />
+          <button
+            type="button"
+            aria-label="关闭预览"
+            onClick={() => setPreviewImage(null)}
+            className="absolute right-5 top-5 rounded-full bg-white/10 px-3 py-1 text-sm text-white hover:bg-white/20"
+          >
+            ✕
+          </button>
+        </div>
+      ) : null}
     </section>
   );
 }

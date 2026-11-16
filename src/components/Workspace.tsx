@@ -85,6 +85,24 @@ function Rail() {
         <span title={CONNECTION_LABEL[state.connection] ?? state.connection} className={`h-2.5 w-2.5 rounded-full ${dot}`} />
         <button
           type="button"
+          aria-label="桌面通知"
+          aria-pressed={state.notifications}
+          data-notifications={state.notifications ? 'on' : 'off'}
+          title={state.notifications ? '桌面通知已开启' : '开启桌面通知'}
+          onClick={() => {
+            if (state.notifications) imStore.disableNotifications();
+            else void imStore.enableNotifications();
+          }}
+          className={`grid h-9 w-9 place-items-center rounded-xl border text-sm transition ${
+            state.notifications
+              ? 'border-indigo-400 bg-indigo-50 text-indigo-600 dark:bg-indigo-950 dark:text-indigo-300'
+              : 'border-slate-200 text-slate-500 hover:border-indigo-400 dark:border-slate-700'
+          }`}
+        >
+          {state.notifications ? '🔔' : '🔕'}
+        </button>
+        <button
+          type="button"
           onClick={() => imStore.logout()}
           className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-slate-900 dark:border-slate-700 dark:hover:text-slate-100"
         >

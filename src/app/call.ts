@@ -6,6 +6,8 @@
 import { Room, RoomEvent, Track, type RemoteTrack } from 'livekit-client';
 
 export interface CallTrackHandlers {
+  /** identities of participants currently speaking (active speaker detection). */
+  onSpeakers?: (uids: string[]) => void;
   /** identity -> attached <video> element (group calls keep one per peer). */
   onRemoteTracks?: (tracks: Map<string, HTMLVideoElement>) => void;
 }
@@ -48,6 +50,10 @@ export class CallSession {
         this.emitTracks();
       }
       track.detach().forEach((element) => element.remove());
+    });
+
+    room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      this.handlers.onSpeakers?.(speakers.map((participant) => participant.identity).filter(Boolean));
     });
 
     await room.connect(url, token);

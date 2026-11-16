@@ -89,6 +89,24 @@ export interface MergeInfo {
   items: { server_msg_id: string; send_id: string; text: string }[];
 }
 
+/** One-line preview used by notifications and list subtitles. */
+export const messagePreview = (raw: string, msgType: number): string => {
+  const image = imageOf(raw);
+  if (msgType === 2) return image ? '[图片]' : '[图片]';
+  if (msgType === 3) return '[语音]';
+  if (msgType === 4) return '[视频]';
+  if (msgType === 5) return '[文件]';
+  if (msgType === 20) return '[语音通话]';
+  if (msgType === 21) return '[视频通话]';
+  if (msgType === 22) return '[群通话]';
+  const quote = quoteOf(raw);
+  const body = quote ? quote.text : (() => {
+    const { text } = messageText(raw, msgType);
+    return text;
+  })();
+  return body.replace(/\s+/g, ' ').slice(0, 60);
+};
+
 /** Reads the merged card of a 1503 message, or null. */
 export const mergeOf = (raw: string): MergeInfo | null => {
   const parsed = parseContent(raw);

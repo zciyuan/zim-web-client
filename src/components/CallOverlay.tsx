@@ -100,7 +100,10 @@ export function CallOverlay() {
                 <div
                   key={tile.uid}
                   data-video-tile={tile.uid}
-                  className="relative flex items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-900"
+                  data-speaking={call.speaking.includes(tile.uid) ? 'true' : 'false'}
+                  className={`relative flex items-center justify-center overflow-hidden rounded-xl border bg-slate-900 transition ${
+                    call.speaking.includes(tile.uid) ? 'border-emerald-400 ring-2 ring-emerald-400/60' : 'border-slate-800'
+                  }`}
                 >
                   {tile.element ? (
                     <VideoHost element={tile.element} />

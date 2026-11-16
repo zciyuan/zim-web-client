@@ -435,6 +435,13 @@ const main = async () => {
   await alice.waitForSelector('[aria-label="聊天"] img[alt="图片消息"]', { timeout: 30_000 });
   await alice.screenshot({ path: path.join(OUT, '07-image.png') });
 
+  step('image opens in the in-app lightbox');
+  await jsClick(alice, '[data-image-bubble]');
+  await alice.waitForSelector('[data-image-preview]', { timeout: 10_000 });
+  await alice.screenshot({ path: path.join(OUT, '25-lightbox.png') });
+  await alice.keyboard.press('Escape');
+  await alice.waitForFunction(() => document.querySelector('[data-image-preview]') === null, { timeout: 10_000 });
+
   step('file attachment produces a file card');
   const attachmentPath = path.join(OUT, 'e2e-attachment.txt');
   fs.mkdirSync(OUT, { recursive: true });
@@ -689,6 +696,12 @@ const main = async () => {
     () => document.querySelectorAll('[data-video-tile]').length >= 2,
     { timeout: 20_000 },
   );
+  // Speaking highlight is wired: every tile exposes data-speaking.
+  const speakingAttr = await alice.evaluate(() => ({
+    tiles: document.querySelectorAll('[data-video-tile]').length,
+    marked: document.querySelectorAll('[data-video-tile][data-speaking]').length,
+  }));
+  assert.equal(speakingAttr.marked, speakingAttr.tiles, `speaking marker missing: ${JSON.stringify(speakingAttr)}`);
   await alice.screenshot({ path: path.join(OUT, '24-video-grid.png') });
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="通话"] button')]
@@ -893,6 +906,20 @@ const main = async () => {
     (wsInbox.data?.requests ?? []).some((item) => String(item.from_id) === String(aliceWsUid)),
     `friend inbox missing the WS request: ${JSON.stringify(wsInbox.data)}`,
   );
+
+  step('desktop notification toggle requests permission');
+  await alice.bringToFront();
+  await alice.browser().defaultBrowserContext().overridePermissions('http://127.0.0.1:5280', ['notifications']);
+  await jsClick(alice, '[aria-label="桌面通知"]');
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const notifyDiag = await alice.evaluate(() => ({
+    permission: typeof Notification === 'undefined' ? 'unsupported' : Notification.permission,
+    flag: document.querySelector('[aria-label="桌面通知"]')?.getAttribute('data-notifications'),
+    toast: window.__zim.getSnapshot().toast?.text,
+  }));
+  console.log('  notifications:', JSON.stringify(notifyDiag));
+  assert.equal(notifyDiag.flag, 'on', `notification toggle failed: ${JSON.stringify(notifyDiag)}`);
+  await alice.screenshot({ path: path.join(OUT, '26-notifications.png') });
 
   step('PWA manifest is served');
   const manifest = await alice.evaluate(async () => {
