@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { callSession } from '../app/call';
-import { imStore, useIm } from '../app/store';
+import { CALL_RING_TIMEOUT_MS, imStore, useIm } from '../app/store';
 import { Avatar } from './Avatar';
 
 /** Elapsed seconds of an active call. */
@@ -18,6 +18,23 @@ const useElapsed = (startedAt: number, active: boolean): number => {
     return () => window.clearInterval(timer);
   }, [active, startedAt]);
   return seconds;
+};
+
+/** Seconds left before the ring times out (0 when not ringing). */
+const useRingRemaining = (ringing: boolean): number => {
+  const [remaining, setRemaining] = useState(0);
+  useEffect(() => {
+    if (!ringing) {
+      setRemaining(0);
+      return;
+    }
+    const deadline = Date.now() + CALL_RING_TIMEOUT_MS;
+    const tick = () => setRemaining(Math.max(0, Math.ceil((deadline - Date.now()) / 1000)));
+    tick();
+    const timer = window.setInterval(tick, 500);
+    return () => window.clearInterval(timer);
+  }, [ringing]);
+  return remaining;
 };
 
 const clock = (total: number): string =>
@@ -47,10 +64,11 @@ export function CallOverlay() {
   const [remoteTracks, setRemoteTracks] = useState<{ uid: string; element: HTMLVideoElement }[]>([]);
   const [localVideoEl, setLocalVideoEl] = useState<HTMLVideoElement | null>(null);
   const elapsed = useElapsed(call.startedAt, call.phase === 'active');
+  const ringing = call.phase === 'outgoing' || call.phase === 'incoming';
+  const ringLeft = useRingRemaining(ringing);
   const video = call.media === 2;
   const isGroup = call.targetType === 2;
   const selfUid = String(state.me?.uid ?? '');
-  if (import.meta.env.DEV) console.debug('[zim] call sheet render', call.phase, remoteTracks.length);
 
   useEffect(() => {
     if (call.phase !== 'active' && call.phase !== 'connecting') return;
@@ -98,7 +116,13 @@ export function CallOverlay() {
       >
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2 text-xs text-slate-400">
           <span>{call.targetType === 2 ? '群' : ''}{video ? '视频通话' : '语音通话'}</span>
-          <span>{call.phase === 'active' ? clock(elapsed) : '等待接通'}</span>
+          <span data-ring-countdown={ringing ? ringLeft : undefined}>
+            {call.phase === 'active'
+              ? clock(elapsed)
+              : ringing
+                ? `${call.phase === 'outgoing' ? '等待接通' : '待接听'} ${ringLeft}s`
+                : '正在接入…'}
+          </span>
         </div>
 
         <div className="relative flex h-[300px] items-center justify-center bg-slate-950">

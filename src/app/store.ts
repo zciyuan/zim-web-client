@@ -116,6 +116,23 @@ const savedEndpoint = (): string => {
 };
 const SDK_VERSION = 'web-2.0.0';
 
+/**
+ * Ringing timeout shared by both ends. The server's maintenance sweep expires
+ * ringing calls older than 30s, so the client uses the same window and ends the
+ * sheet itself — otherwise a callee that never answers leaves the caller stuck
+ * on "正在呼叫…" forever.
+ *
+ * `localStorage.zim.callRingTimeout` (ms) overrides it for tests.
+ */
+export const CALL_RING_TIMEOUT_MS = (() => {
+  if (typeof localStorage === 'undefined') return 30_000;
+  const override = Number(localStorage.getItem('zim.callRingTimeout'));
+  return Number.isFinite(override) && override >= 1000 ? override : 30_000;
+})();
+
+/** Joining the SFU (room token + connect) must not hang the sheet forever. */
+const CALL_CONNECT_TIMEOUT_MS = 20_000;
+
 export type Tab = 'conversations' | 'unread' | 'friends' | 'groups';
 export type AppStatus = 'idle' | 'restoring' | 'authenticating' | 'ready';
 
@@ -361,10 +378,14 @@ class ImStore {
   private restorePromise: Promise<void> | null = null;
   /** Timestamps of recent abnormal closes (kick-loop detection). */
   private closeStamps: number[] = [];
+  /** Ringing timeout for the current call (both ends). */
+  private ringTimer: number | null = null;
+  /** Join-the-SFU timeout for the current call. */
+  private connectTimer: number | null = null;
   /** Pushes that arrived while a thread page was still loading, keyed by cid. */
   private pendingPushes = new Map<string, UiMessage[]>();
   /** Files kept for failed uploads so they can be retried. */
-  private uploadJobs = new Map<string, { file: File; msgType: number }>();
+  private uploadJobs = new Map<string, { file: File; msgType: number; guard: number | null }>();
 
   constructor() {
     this.applyTheme();
@@ -1842,11 +1863,38 @@ class ImStore {
 
   /** Keeps a failed upload's file so the bubble can offer a retry. */
   private trackUpload(clientMsgId: string, file: File, msgType: number): void {
-    this.uploadJobs.set(clientMsgId, { file, msgType });
+    this.uploadJobs.set(clientMsgId, { file, msgType, guard: null });
     this.set({ uploadRetries: [...this.state.uploadRetries, clientMsgId] });
+    this.armUploadGuard(clientMsgId);
+  }
+
+  /** An upload that stalls (no error, no completion) must not stay "上传中"
+   * forever: fail it after the guard window so the retry button appears. */
+  private armUploadGuard(clientMsgId: string): void {
+    const job = this.uploadJobs.get(clientMsgId);
+    if (!job) return;
+    if (job.guard) window.clearTimeout(job.guard);
+    job.guard = window.setTimeout(() => {
+      const current = this.uploadJobs.get(clientMsgId);
+      if (!current) return;
+      current.guard = null;
+      this.markUploadFailed(clientMsgId);
+      this.notify('上传超时，可点击重试', 'error');
+    }, 90_000);
+  }
+
+  /** Marks the draft message of a stalled upload as failed (keeps the retry). */
+  private markUploadFailed(clientMsgId: string): void {
+    for (const [cid, thread] of Object.entries(this.state.threads)) {
+      if (!thread.items.some((item) => item.client_msg_id === clientMsgId)) continue;
+      this.updateMessage(cid, clientMsgId, { localState: 'failed', progress: undefined });
+      return;
+    }
   }
 
   private clearUpload(clientMsgId: string): void {
+    const job = this.uploadJobs.get(clientMsgId);
+    if (job?.guard) window.clearTimeout(job.guard);
     this.uploadJobs.delete(clientMsgId);
     if (this.state.uploadRetries.includes(clientMsgId)) {
       this.set({ uploadRetries: this.state.uploadRetries.filter((id) => id !== clientMsgId) });
@@ -1867,6 +1915,8 @@ class ImStore {
     const cid = conversation.conversation_id;
     const progress = (percent: number) => this.updateMessage(cid, clientMsgId, { progress: percent });
     this.updateMessage(cid, clientMsgId, { localState: 'sending', progress: 0 });
+    // Re-arm the stall guard for the retry attempt.
+    this.armUploadGuard(clientMsgId);
     try {
       if (job.msgType === 2) {
         const dimensions = await measureImage(job.file);
@@ -2567,6 +2617,68 @@ class ImStore {
 
   // ------------------------------------------------------------------ call --
 
+  /** Cancels the ring/connect timers of the current call. */
+  private clearCallTimers(): void {
+    if (this.ringTimer !== null) {
+      window.clearTimeout(this.ringTimer);
+      this.ringTimer = null;
+    }
+    if (this.connectTimer !== null) {
+      window.clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+  }
+
+  /** Arms the shared ring timeout for the phase that is being entered. */
+  private armRingTimer(): void {
+    this.clearCallTimers();
+    this.ringTimer = window.setTimeout(() => {
+      this.ringTimer = null;
+      void this.onRingTimeout();
+    }, CALL_RING_TIMEOUT_MS);
+  }
+
+  /** Ring timeout: the caller gives up, the callee dismisses the sheet. */
+  private async onRingTimeout(): Promise<void> {
+    const call = this.state.call;
+    if (call.phase === 'outgoing') {
+      this.notify('对方长时间无应答，已结束呼叫', 'error');
+      await this.cancelCall();
+      return;
+    }
+    if (call.phase !== 'incoming') return;
+    // The caller cancels at the same deadline and that push closes this sheet
+    // with the right wording. Wait briefly for it, then dismiss locally: a
+    // local reject would reach the caller as "对方忙线中".
+    const callId = call.callId;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const current = this.state.call;
+    if (current.callId !== callId || current.phase !== 'incoming') return;
+    this.notify('未接听的呼叫已结束');
+    await this.endCall('timeout');
+  }
+
+  /** Cancels the SFU-join timer only (the ring timer keeps running). */
+  private clearConnectTimer(): void {
+    if (this.connectTimer !== null) {
+      window.clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+  }
+
+  /** Arms the SFU-join timeout (callee side and caller side alike). */
+  private armConnectTimer(): void {
+    if (this.connectTimer !== null) window.clearTimeout(this.connectTimer);
+    this.connectTimer = window.setTimeout(() => {
+      this.connectTimer = null;
+      const call = this.state.call;
+      if (!call.callId) return;
+      if (call.phase !== 'connecting' && call.phase !== 'outgoing') return;
+      this.notify('接入通话超时，请重试', 'error');
+      void this.endCall('timeout');
+    }, CALL_CONNECT_TIMEOUT_MS);
+  }
+
   /** Server pushed an RTC state change (1802 with seq=0). */
   private handleCallPush(payload: Uint8Array): void {
     let update: CallAnswerPush;
@@ -2579,7 +2691,17 @@ class ImStore {
     if (import.meta.env.DEV) console.debug(`[zim] call push phase=${update.phase} target=${update.target_type} media=${update.media}`);
     switch (update.phase) {
       case 1:
-        // Ringing: the callee shows the incoming call sheet.
+        // Ringing: the callee shows the incoming call sheet. A second call while
+        // one is already live must not hijack the sheet: reject it right away.
+        if (this.state.call.phase !== 'idle') {
+          this.notify(`有人来电，但你正在${this.state.call.phase === 'incoming' ? '接听另一通电话' : '通话中'}`);
+          void this.client?.request(
+            OP.CALL_ANSWER,
+            encodeCallAnswerReq({ callId: update.call_id, accept: false }),
+            decodeCallAnswer,
+          ).catch(() => undefined);
+          return;
+        }
         this.set({
           call: {
             phase: 'incoming',
@@ -2598,10 +2720,12 @@ class ImStore {
             error: '',
           },
         });
+        this.armRingTimer();
         break;
       case 2:
         // Answered by the peer (caller side) or auto-answered (family).
         if (this.state.call.callId !== update.call_id) return;
+        this.clearCallTimers();
         if (this.state.call.phase === 'incoming') {
           this.set({ call: { ...this.state.call, joinedElsewhere: true } });
           return;
@@ -2625,6 +2749,10 @@ class ImStore {
         }
         break;
       case 3:
+        // Rejected / busy from the far end. Ignore it when this side already
+        // ended the call: both ends run the same ring timeout.
+        if (this.state.call.callId !== update.call_id || this.state.call.phase === 'idle') return;
+        this.clearCallTimers();
         this.notify('对方忙线中', 'error');
         void this.endCall('busy');
         break;
@@ -2680,6 +2808,9 @@ class ImStore {
         error: '',
       },
     });
+    // The callee may never answer: give up after the shared ring timeout.
+    this.armRingTimer();
+    this.armConnectTimer();
 
     try {
       const res = await this.client.request(
@@ -2689,6 +2820,9 @@ class ImStore {
       );
       this.set({ call: { ...this.state.call, room: res.payload.room } });
       await this.joinCallRoom(callId, media === 2);
+      // Joined the SFU while still ringing: the ring timer keeps running, the
+      // connect timer must not end the call before someone answers.
+      this.clearConnectTimer();
     } catch (err) {
       this.notify(`呼叫失败：${explainRtcError(wrapError(err).display)}`, 'error');
       await this.endCall('error');
@@ -2705,10 +2839,13 @@ class ImStore {
       return;
     }
     this.set({ call: { ...call, phase: 'connecting' } });
+    this.clearCallTimers();
+    this.armConnectTimer();
     try {
       await this.client.request(OP.CALL_ANSWER, encodeCallAnswerReq({ callId: call.callId, accept: true }), decodeCallAnswer);
       if (import.meta.env.DEV) console.debug('[zim] call answered, fetching room token');
       await this.joinCallRoom(call.callId, call.media === 2);
+      this.clearCallTimers();
       this.set({ call: { ...this.state.call, phase: 'active', startedAt: Date.now() } });
     } catch (err) {
       this.notify(`接听失败：${wrapError(err).display}`, 'error');
@@ -2825,12 +2962,28 @@ class ImStore {
         if (this.state.call.callId !== callId) return;
         this.set({ call: { ...this.state.call, speaking: uids } });
       },
+      onParticipantLeft: () => {
+        const call = this.state.call;
+        // In a 1:1 call the other side leaving means the call is over; in a
+        // group call it is just one participant hanging up.
+        if (call.callId !== callId || call.targetType !== 1) return;
+        if (call.phase !== 'active' && call.phase !== 'connecting') return;
+        this.notify('对方已离开，通话结束');
+        void this.endCall('remote');
+      },
+      onDisconnected: () => {
+        const call = this.state.call;
+        if (call.callId !== callId || call.phase === 'idle') return;
+        this.notify('通话连接已断开', 'error');
+        void this.endCall('error');
+      },
     });
     await callSession.connect(sfuUrlFor(sfuUrl), token, video);
     if (import.meta.env.DEV) console.debug('[zim] call media connected');
   }
 
   private async endCall(_reason: string): Promise<void> {
+    this.clearCallTimers();
     await callSession.end().catch(() => undefined);
     this.set({
       call: {

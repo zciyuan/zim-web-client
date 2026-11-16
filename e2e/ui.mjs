@@ -13,7 +13,9 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import puppeteer from 'puppeteer-core';
 
-const BASE = process.argv[2] ?? 'http://127.0.0.1:5280';
+// The dev server serves HTTPS when calls are exercised (WebRTC needs a secure
+// context), so the base URL is configurable.
+const BASE = process.argv[2] ?? process.env.ZIM_E2E_BASE ?? 'https://127.0.0.1:5280';
 const CHROME = process.env.ZIM_CHROME ?? 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const DEBUG_PORT = Number(process.env.ZIM_DEBUG_PORT ?? 9455);
 const OUT = path.resolve('_output/screens');
@@ -33,6 +35,8 @@ const launchChrome = async () => {
     '--no-first-run',
     '--no-default-browser-check',
     '--disable-gpu',
+    // Self-signed dev certificate for https://127.0.0.1:5280.
+    '--ignore-certificate-errors',
     '--lang=zh-CN',
     // Fake mic/camera so the RTC flow can be exercised headlessly.
     '--use-fake-device-for-media-stream',
@@ -1723,6 +1727,46 @@ const main = async () => {
   const messageCount = await alice.evaluate(() => Object.values(window.__zim.getSnapshot().threads)
     .reduce((total, thread) => total + thread.items.length, 0));
   assert.ok(messageCount > 0, 'alice should have rendered message bubbles in some thread');
+  step('an unanswered call times out on both ends');
+  // Ring timeout is 30s in production; the page override keeps the test short.
+  const ringCaller = await browser.newPage();
+  const ringCallee = await browser.newPage();
+  for (const page of [ringCaller, ringCallee]) {
+    page.on('pageerror', (err) => errors.push(`ring pageerror: ${err.message}`));
+    await page.evaluateOnNewDocument(() => localStorage.setItem('zim.callRingTimeout', '4000'));
+    await page.goto(BASE, { waitUntil: 'networkidle2' });
+  }
+  await loginAs(ringCaller, 'alice');
+  await loginAs(ringCallee, 'bob');
+  await ringCaller.evaluate(() => window.__zim.openConversation('s_10001_10002'));
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  await ringCaller.evaluate(() => {
+    const button = [...document.querySelectorAll('button')].find((item) => item.textContent?.trim() === '语音');
+    button?.click();
+  });
+  const countdown = await ringCaller.evaluate(async () => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const text = document.querySelector('[data-ring-countdown]')?.textContent ?? '';
+      if (text) return text;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    return '';
+  });
+  assert.ok(countdown.includes('s'), `ring countdown missing: ${countdown}`);
+  const calleeRinging = await ringCallee.waitForFunction(
+    () => window.__zim.getSnapshot().call.phase === 'incoming',
+    { timeout: 10_000 },
+  ).then(() => true).catch(() => false);
+  assert.ok(calleeRinging, 'callee never saw the incoming call');
+  await new Promise((resolve) => setTimeout(resolve, 7000));
+  const callerPhase = await ringCaller.evaluate(() => window.__zim.getSnapshot().call.phase);
+  const calleePhase = await ringCallee.evaluate(() => window.__zim.getSnapshot().call.phase);
+  assert.equal(callerPhase, 'idle', `caller still in ${callerPhase} after the ring timeout`);
+  assert.equal(calleePhase, 'idle', `callee still in ${calleePhase} after the ring timeout`);
+  await ringCaller.screenshot({ path: path.join(OUT, '41-ring-timeout.png') });
+  await ringCaller.close();
+  await ringCallee.close();
+
   step('a second login kicks the first one out');
   // Same account, same platform: the newest socket wins, the old one gets a
   // 1902 push and must land back on the login screen with the reason.
