@@ -32,6 +32,9 @@ export default defineConfig(({ mode }) => {
       proxy: {
         '/v1': { target: api, changeOrigin: true },
         '/ws': { target: ws, ws: true },
+        // LiveKit signalling: browsers on the LAN reach it through this origin,
+        // so calls reuse the page certificate instead of a loopback ws:// URL.
+        '/rtc': { target: env.ZIM_RTC ?? 'ws://127.0.0.1:7880', ws: true },
       },
     },
     preview: { port: 4173, host: env.ZIM_HOST ?? '0.0.0.0' },

@@ -50,17 +50,25 @@ export function CallOverlay() {
   const video = call.media === 2;
   const isGroup = call.targetType === 2;
   const selfUid = String(state.me?.uid ?? '');
+  if (import.meta.env.DEV) console.debug('[zim] call sheet render', call.phase, remoteTracks.length);
 
   useEffect(() => {
     if (call.phase !== 'active' && call.phase !== 'connecting') return;
     callSession.onTrack({
       onRemoteTracks: (tracks) => {
-        setRemoteTracks([...tracks].map(([uid, element]) => ({ uid, element })));
+        // Only update when the set really changed: a fresh array on every SDK
+        // event re-renders the whole sheet and re-attaches the video elements.
+        setRemoteTracks((current) => {
+          if (current.length === tracks.size && current.every((item) => tracks.get(item.uid) === item.element)) {
+            return current;
+          }
+          return [...tracks].map(([uid, element]) => ({ uid, element }));
+        });
       },
     });
     void callSession.localVideo().then((element) => {
       if (!element) return;
-      setLocalVideoEl(element);
+      setLocalVideoEl((current) => (current === element ? current : element));
       const host = localRef.current;
       if (host) {
         host.replaceChildren(element);

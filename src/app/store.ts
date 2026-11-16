@@ -245,6 +245,26 @@ const normalizeHttpBase = (raw: string): string => {
 
 const wsBaseOf = (httpBase: string): string => (httpBase ? httpBase.replace(/^http/i, 'ws') : '');
 
+// The SFU URL comes from the server. In dev it is a loopback address, which a
+// phone on the LAN cannot reach, and an https page cannot open ws:// at all.
+// Rewrite it to the page origin (/rtc is proxied by the dev server) so calls
+// work from any device on the network with the certificate the page already has.
+const sfuUrlFor = (raw: string): string => {
+  if (typeof window === 'undefined') return raw;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return raw;
+  }
+  const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1';
+  const insecureOnHttps = window.location.protocol === 'https:' && url.protocol === 'ws:';
+  if (!loopback && !insecureOnHttps) return raw;
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  // The LiveKit SDK appends /rtc itself, so the base must stay at the origin.
+  return `${scheme}//${window.location.host}`;
+};
+
 const deviceId = (): string => {
   let id = localStorage.getItem(DEVICE_KEY);
   if (!id) {
@@ -2806,7 +2826,7 @@ class ImStore {
         this.set({ call: { ...this.state.call, speaking: uids } });
       },
     });
-    await callSession.connect(sfuUrl, token, video);
+    await callSession.connect(sfuUrlFor(sfuUrl), token, video);
     if (import.meta.env.DEV) console.debug('[zim] call media connected');
   }
 

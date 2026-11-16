@@ -2,6 +2,7 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App';
+import { callSession } from './app/call';
 import { imStore } from './app/store';
 import './index.css';
 
@@ -11,6 +12,7 @@ if (!container) throw new Error('#root is missing');
 // Dev-only handle for the e2e harness and for poking at state in devtools.
 if (import.meta.env.DEV) {
   (window as unknown as { __zim?: unknown }).__zim = imStore;
+  (window as unknown as { __zimCall?: unknown }).__zimCall = callSession;
 }
 
 createRoot(container).render(
