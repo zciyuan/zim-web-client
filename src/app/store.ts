@@ -10,6 +10,7 @@ import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
 import { captureVideoPoster, compressImage, measureImage, measureMedia } from './image';
+import { detectRtcSupport, explainRtcError } from './rtc-support';
 import {
   OP,
   decodeMessageItem,
@@ -462,6 +463,11 @@ class ImStore {
   }
 
   /** Re-reads the list snapshots after a reconnect or a manual refresh. */
+  /** WebRTC capability of the current browser (call UI degrades on it). */
+  get rtcSupport(): ReturnType<typeof detectRtcSupport> {
+    return detectRtcSupport();
+  }
+
   /** Manual retry after a dropped connection: reopen the socket and refresh. */
   async retryConnection(): Promise<void> {
     if (this.state.connection === 'open' || this.state.connection === 'connecting' || this.state.connection === 'reconnecting') {
@@ -2547,6 +2553,11 @@ class ImStore {
       return;
     }
     if (this.state.call.phase !== 'idle') return;
+    const support = detectRtcSupport();
+    if (!support.supported) {
+      this.notify(`无法呼叫：${support.detail}`, 'error');
+      return;
+    }
     const callId = crypto.randomUUID();
     const isGroup = conversation.type === 2;
     const targetType: 1 | 2 = isGroup ? 2 : 1;
@@ -2591,7 +2602,7 @@ class ImStore {
       this.set({ call: { ...this.state.call, room: res.payload.room } });
       await this.joinCallRoom(callId, media === 2);
     } catch (err) {
-      this.notify(`呼叫失败：${wrapError(err).display}`, 'error');
+      this.notify(`呼叫失败：${explainRtcError(wrapError(err).display)}`, 'error');
       await this.endCall('error');
     }
   }
@@ -2600,6 +2611,11 @@ class ImStore {
   async acceptCall(): Promise<void> {
     const call = this.state.call;
     if (call.phase !== 'incoming' || !this.client) return;
+    const support = detectRtcSupport();
+    if (!support.supported) {
+      this.notify(`无法接听：${support.detail}`, 'error');
+      return;
+    }
     this.set({ call: { ...call, phase: 'connecting' } });
     try {
       await this.client.request(OP.CALL_ANSWER, encodeCallAnswerReq({ callId: call.callId, accept: true }), decodeCallAnswer);
@@ -2616,6 +2632,11 @@ class ImStore {
   async rejectCall(): Promise<void> {
     const call = this.state.call;
     if (call.phase !== 'incoming' || !this.client) return;
+    const support = detectRtcSupport();
+    if (!support.supported) {
+      this.notify(`无法接听：${support.detail}`, 'error');
+      return;
+    }
     try {
       await this.client.request(OP.CALL_ANSWER, encodeCallAnswerReq({ callId: call.callId, accept: false }), decodeCallAnswer);
     } catch {

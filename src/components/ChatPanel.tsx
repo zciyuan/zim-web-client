@@ -972,6 +972,8 @@ export function ChatPanel() {
               <button
                 type="button"
                 aria-label="语音通话"
+                data-rtc-support={imStore.rtcSupport.supported ? 'ok' : imStore.rtcSupport.reason}
+                title={imStore.rtcSupport.supported ? '发起语音通话' : imStore.rtcSupport.detail}
                 onClick={() => void imStore.startCall(1)}
                 className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
               >
@@ -980,6 +982,8 @@ export function ChatPanel() {
               <button
                 type="button"
                 aria-label="视频通话"
+                data-rtc-support={imStore.rtcSupport.supported ? 'ok' : imStore.rtcSupport.reason}
+                title={imStore.rtcSupport.supported ? '发起视频通话' : imStore.rtcSupport.detail}
                 onClick={() => void imStore.startCall(2)}
                 className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
               >
