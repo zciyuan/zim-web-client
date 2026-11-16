@@ -45,6 +45,7 @@ export function CallOverlay() {
   const call = state.call;
   const localRef = useRef<HTMLDivElement>(null);
   const [remoteTracks, setRemoteTracks] = useState<{ uid: string; element: HTMLVideoElement }[]>([]);
+  const [localVideoEl, setLocalVideoEl] = useState<HTMLVideoElement | null>(null);
   const elapsed = useElapsed(call.startedAt, call.phase === 'active');
   const video = call.media === 2;
   const isGroup = call.targetType === 2;
@@ -58,8 +59,10 @@ export function CallOverlay() {
       },
     });
     void callSession.localVideo().then((element) => {
+      if (!element) return;
+      setLocalVideoEl(element);
       const host = localRef.current;
-      if (host && element) {
+      if (host) {
         host.replaceChildren(element);
         void element.play().catch(() => undefined);
       }
@@ -71,7 +74,7 @@ export function CallOverlay() {
   // One tile per participant, local self first; peers without video show an avatar.
   const tiles = isGroup
     ? [
-      { uid: selfUid, element: null as HTMLVideoElement | null, self: true },
+      { uid: selfUid, element: localVideoEl, self: true },
       ...call.participants
         .filter((uid) => uid !== selfUid)
         .map((uid) => ({ uid, element: remoteTracks.find((item) => item.uid === uid)?.element ?? null, self: false })),
