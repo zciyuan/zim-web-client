@@ -639,7 +639,22 @@ class ImStore {
       onKick: (event) => this.handleKick(event.reason),
     });
 
-    const login = await this.client.open(token);
+    // A second login can catch the server closing the previous binding: the
+    // socket dies mid-handshake with "连接已关闭". One retry always wins.
+    let login: LoginRes | null = null;
+    for (let attempt = 0; attempt < 3 && !login; attempt += 1) {
+      try {
+        login = await this.client.open(token);
+      } catch (err) {
+        const text = wrapError(err).display;
+        if (attempt < 2 && /连接已关闭|连接已断开|连接已关闭|已断开连接/.test(text)) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (!login) throw new ImError(0, '登录失败，请重试');
     // The REST client owns both tokens (login or refresh may have rotated them).
     this.persistSession(endpoint, username);
     this.rememberSyncBaseline(login.uid, login.sync);

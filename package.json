@@ -5,6 +5,7 @@
   "description": "ZIM instant messaging client: one React + TypeScript codebase for web, desktop (Tauri) and app (PWA/Capacitor)",
   "type": "module",
   "scripts": {
+    "cert": "node scripts/dev-cert.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
