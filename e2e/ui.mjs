@@ -987,6 +987,97 @@ const main = async () => {
     { timeout: 20_000 },
   );
 
+  step('links and emails become clickable');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  const linkText = `文档 https://example.com/zim/docs 邮箱 dev@example.com ${Date.now() % 10000}`;
+  await setValue(alice, 'textarea', linkText);
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    button?.click();
+  });
+  await alice.waitForFunction(
+    (needle) => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes(needle) && node.querySelector('[data-link]')),
+    { timeout: 20_000 },
+    linkText,
+  );
+  const linkAttrs = await alice.evaluate(() => {
+    const link = document.querySelector('[data-link]');
+    const mail = document.querySelector('[data-mail]');
+    return { href: link?.getAttribute('href') ?? '', mailto: mail?.getAttribute('href') ?? '' };
+  });
+  assert.equal(linkAttrs.href, 'https://example.com/zim/docs');
+  assert.equal(linkAttrs.mailto, 'mailto:dev@example.com');
+
+  step('group members can be searched and show role badges');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
+  await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
+  await jsClick(alice, '[aria-label="群设置"]');
+  await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
+  await clickByText(alice, 'dialog button', '成员');
+  await alice.waitForSelector('[data-member-row]', { timeout: 15_000 });
+  const memberCount = await alice.evaluate(() => document.querySelectorAll('[data-member-row]').length);
+  const ownerBadge = await alice.evaluate(() => document.querySelectorAll('[data-role-badge="owner"]').length);
+  assert.ok(ownerBadge >= 1, 'owner badge missing');
+  await setValue(alice, 'dialog input[aria-label="搜索群成员"]', 'zzz-not-a-member');
+  await alice.waitForFunction(
+    (before) => document.querySelectorAll('[data-member-row]').length < before,
+    { timeout: 10_000 },
+    memberCount,
+  );
+  await setValue(alice, 'dialog input[aria-label="搜索群成员"]', '');
+  await alice.waitForFunction(
+    (before) => document.querySelectorAll('[data-member-row]').length === before,
+    { timeout: 10_000 },
+    memberCount,
+  );
+  await clickByText(alice, 'dialog button', '关闭');
+
+  step('long-press opens the message menu on touch');
+  await alice.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+  await alice.bringToFront();
+  await alice.evaluate(() => window.__zim.openConversation('s_10001_10002'));
+  await alice.waitForSelector('[aria-label="聊天"] .message-enter', { timeout: 15_000 });
+  await alice.evaluate(() => {
+    const bubble = document.querySelector('[aria-label="聊天"] .message-enter');
+    const rect = bubble.getBoundingClientRect();
+    const touch = new Touch({ identifier: 9, target: bubble, clientX: rect.left + 30, clientY: rect.top + 10 });
+    bubble.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
+  });
+  await alice.waitForSelector('[data-message-menu]', { timeout: 10_000 });
+  await alice.screenshot({ path: path.join(OUT, '39-longpress-message.png') });
+  await alice.evaluate(() => {
+    const backdrop = document.querySelector('[data-message-menu]')?.previousElementSibling;
+    backdrop?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+  await alice.setViewport({ width: 1440, height: 900 });
+
+  step('unread page sorts @me conversations first');
+  await bob.bringToFront();
+  await bob.setViewport({ width: 1440, height: 900 });
+  await bob.evaluate(() => window.__zim.refresh());
+  await jsClick(bob, '[aria-label="主导航"] button:nth-child(2)');
+  await bob.waitForSelector('[data-unread-page]', { timeout: 10_000 });
+  await bob.evaluate(() => {
+    const toggle = document.querySelector('[data-atme-first]');
+    if (toggle?.getAttribute('data-atme-first') !== 'on') toggle?.click();
+  });
+  await bob.waitForFunction(
+    () => document.querySelector('[data-atme-first]')?.getAttribute('data-atme-first') === 'on',
+    { timeout: 10_000 },
+  );
+  const firstRowMentions = await bob.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-unread-row]')];
+    const first = rows[0];
+    if (!first) return 'no-rows';
+    return first.querySelector('[data-row-at-me]') ? 'at-me' : 'plain';
+  });
+  assert.ok(firstRowMentions === 'at-me' || firstRowMentions === 'no-rows', `first unread row = ${firstRowMentions}`);
+
   step('group announcement shows as a banner');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');

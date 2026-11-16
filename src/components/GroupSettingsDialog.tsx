@@ -33,6 +33,7 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
   const [members, setMembers] = useState<GroupMember[] | null>(null);
   const [applies, setApplies] = useState<GroupApply[]>([]);
   const [inviteUids, setInviteUids] = useState('');
+  const [memberQuery, setMemberQuery] = useState('');
   const [name, setName] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
@@ -84,14 +85,44 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
     }
   };
 
+  // Filter members by nickname / username / uid; role order keeps admins visible.
+  const filteredMembers = members === null
+    ? null
+    : members
+      .filter((member) => {
+        const needle = memberQuery.trim().toLowerCase();
+        if (!needle) return true;
+        const name = (member.nickname || member.username || '').toLowerCase();
+        return name.includes(needle) || String(member.user_id).includes(needle);
+      })
+      .sort((a, b) => Number(b.role ?? 0) - Number(a.role ?? 0));
+
   const memberRow = (member: GroupMember) => {
     const name = member.nickname || member.username || `用户 ${member.user_id}`;
     const isSelf = String(member.user_id) === selfUid;
+    const isOwner = member.role === 2;
+    const isGroupAdmin = member.role === 1;
     return (
-      <div key={String(member.user_id)} className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+      <div
+        key={String(member.user_id)}
+        data-member-row={member.user_id}
+        data-member-role={member.role ?? 0}
+        className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/60"
+      >
         <Avatar name={name} seed={member.user_id} size={28} />
         <span className="min-w-0 flex-1 truncate text-[13px]">{name}</span>
-        {member.role ? <span className="text-[11px] text-indigo-500">{roleLabel(member.role)}</span> : null}
+        {isOwner || isGroupAdmin ? (
+          <span
+            data-role-badge={isOwner ? 'owner' : 'admin'}
+            className={`shrink-0 rounded px-1 text-[10px] font-medium ${
+              isOwner
+                ? 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300'
+                : 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300'
+            }`}
+          >
+            {roleLabel(member.role)}
+          </span>
+        ) : null}
         {!isSelf && isAdmin ? (
           <span className="flex shrink-0 gap-1 text-[11px]">
             {isOwner ? (
@@ -196,8 +227,18 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
                 邀请
               </button>
             </div>
+            <input
+              value={memberQuery}
+              onChange={(event) => setMemberQuery(event.target.value)}
+              placeholder="搜索成员昵称或 uid"
+              aria-label="搜索群成员"
+              className="mb-2 w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-800"
+            />
             {members === null ? <p className="py-6 text-center text-xs text-slate-500">加载中…</p> : null}
-            {members?.map(memberRow)}
+            {filteredMembers?.map(memberRow)}
+            {filteredMembers && filteredMembers.length === 0 && (members?.length ?? 0) > 0 ? (
+              <p className="py-6 text-center text-xs text-slate-500">没有匹配的成员</p>
+            ) : null}
             {members && members.length === 0 ? <p className="py-6 text-center text-xs text-slate-500">没有成员</p> : null}
           </div>
         ) : null}

@@ -210,20 +210,45 @@ function Sidebar() {
     return mentionsInUnread(thread.items, Number(conversation.read_seq ?? 0), selfUid, selfName);
   };
 
+  const [atMeFirst, setAtMeFirst] = useState(false);
+  useEffect(() => {
+    try {
+      setAtMeFirst(localStorage.getItem('zim.atMeFirst') !== '0');
+    } catch {
+      // private mode: keep the default
+    }
+  }, []);
+  const toggleAtMeFirst = () => {
+    setAtMeFirst((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem('zim.atMeFirst', next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+  const sortUnreadRows = (rows: typeof state.conversations) => [...rows].sort((a, b) => {
+    if (atMeFirst) {
+      const diff = (rowMentionsMe(b) ? 1 : 0) - (rowMentionsMe(a) ? 1 : 0);
+      if (diff !== 0) return diff;
+    }
+    return Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0);
+  });
+
   const unreadGroups = [
     {
       key: 'single',
       label: '单聊',
-      rows: state.conversations
-        .filter((item) => Number(item.unread ?? 0) > 0 && item.type !== 2)
-        .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0)),
+      rows: sortUnreadRows(state.conversations
+        .filter((item) => Number(item.unread ?? 0) > 0 && item.type !== 2)),
     },
     {
       key: 'group',
       label: '群聊',
-      rows: state.conversations
-        .filter((item) => Number(item.unread ?? 0) > 0 && item.type === 2)
-        .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0)),
+      rows: sortUnreadRows(state.conversations
+        .filter((item) => Number(item.unread ?? 0) > 0 && item.type === 2)),
     },
   ].filter((group) => group.rows.length > 0);
 
@@ -449,6 +474,21 @@ function Sidebar() {
                   <span className="text-[11px] text-slate-400">
                     {visibleUnreadGroups.reduce((sum, group) => sum + group.rows.length, 0)} 个会话有未读
                   </span>
+                  <span className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    aria-label="＠我优先"
+                    aria-pressed={atMeFirst}
+                    data-atme-first={atMeFirst ? 'on' : 'off'}
+                    onClick={toggleAtMeFirst}
+                    className={`rounded-lg border px-2 py-0.5 text-[11px] transition ${
+                      atMeFirst
+                        ? 'border-rose-300 bg-rose-50 text-rose-600 dark:border-rose-900 dark:bg-rose-950 dark:text-rose-300'
+                        : 'border-slate-200 text-slate-500 hover:border-indigo-400 dark:border-slate-700'
+                    }`}
+                  >
+                    ＠我优先
+                  </button>
                   <button
                     type="button"
                     aria-label="全部标为已读"
@@ -461,6 +501,7 @@ function Sidebar() {
                   >
                     全部已读
                   </button>
+                  </span>
                 </div>
                 {visibleUnreadGroups.map((group) => {
                   const collapsed = Boolean(collapsedGroups[group.key]);
@@ -497,8 +538,11 @@ function Sidebar() {
                                 <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
                               </span>
                               <span className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
-                                {mentionsInBrief(conversation.last_msg_brief ?? '', selfUid) ? (
-                                  <span className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950 dark:text-rose-300">
+                                {rowMentionsMe(conversation) ? (
+                                  <span
+                                    data-row-at-me={conversation.conversation_id}
+                                    className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950 dark:text-rose-300"
+                                  >
                                     [有人@我]
                                   </span>
                                 ) : null}

@@ -10,8 +10,12 @@ import { daySeparator, formatClock, imageOf, messageText } from '../app/format';
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
 
 /** Renders "@name" tokens as mentions and one search keyword as <mark>. */
+/** Splits message text into plain runs, links, emails and mentions. */
+const TOKEN_PATTERN = /(https?:\/\/[^\s<>"']+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|@[^\s@]+)/g;
+
+/** Renders links, emails and "@name" tokens, plus one search keyword as <mark>. */
 function MentionText({ text, highlight }: { text: string; highlight?: string }) {
-  const parts = text.split(/(@[^\s@]+)/g);
+  const parts = text.split(TOKEN_PATTERN).filter((part) => part !== '');
   const marked = (chunk: string, key: number) => {
     if (!highlight || !chunk.toLowerCase().includes(highlight.toLowerCase())) {
       return <span key={key}>{chunk}</span>;
@@ -29,10 +33,45 @@ function MentionText({ text, highlight }: { text: string; highlight?: string }) 
   };
   return (
     <>
-      {parts.map((part, index) => (part.startsWith('@') && part.length > 1
-        ? <span key={index} data-mention className="font-medium text-indigo-600 dark:text-indigo-400">{part}</span>
-        : marked(part, index)
-      ))}
+      {parts.map((part, index) => {
+        if (/^https?:\/\//i.test(part)) {
+          // Sentence punctuation belongs to the text, not to the URL.
+          const trailing = part.match(/[.,;:!?)\]}]+$/)?.[0] ?? '';
+          const url = trailing ? part.slice(0, -trailing.length) : part;
+          return (
+            <span key={index}>
+              <a
+                href={url}
+                data-link
+                target="_blank"
+                rel="noreferrer noopener"
+                className="text-indigo-600 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-500 dark:text-indigo-400"
+                onClick={(event) => event.stopPropagation()}
+              >
+                {url}
+              </a>
+              {trailing}
+            </span>
+          );
+        }
+        if (/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/.test(part)) {
+          return (
+            <a
+              key={index}
+              href={`mailto:${part}`}
+              data-mail
+              className="text-indigo-600 underline decoration-indigo-300 underline-offset-2 hover:text-indigo-500 dark:text-indigo-400"
+              onClick={(event) => event.stopPropagation()}
+            >
+              {part}
+            </a>
+          );
+        }
+        if (part.startsWith('@') && part.length > 1) {
+          return <span key={index} data-mention className="font-medium text-indigo-600 dark:text-indigo-400">{part}</span>;
+        }
+        return marked(part, index);
+      })}
     </>
   );
 }
@@ -74,6 +113,14 @@ function Bubble({
   const quote = quoteOf(message.content);
   const merge = mergeOf(message.content);
   const state = message.localState ?? 'sent';
+  // Long-press opens the same menu as right-click on touch devices.
+  const pressTimer = useRef<number | null>(null);
+  const pressOrigin = useRef<{ x: number; y: number } | null>(null);
+  const cancelPress = () => {
+    if (pressTimer.current) window.clearTimeout(pressTimer.current);
+    pressTimer.current = null;
+    pressOrigin.current = null;
+  };
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
   const atUids = message.at_user_ids?.length ? message.at_user_ids.map(String) : atOf(message.content);
@@ -130,6 +177,25 @@ function Bubble({
         event.preventDefault();
         onMenu?.(message, event.clientX, event.clientY);
       }}
+      onTouchStart={(event) => {
+        const touch = event.touches[0];
+        if (!touch || !onMenu) return;
+        pressOrigin.current = { x: touch.clientX, y: touch.clientY };
+        pressTimer.current = window.setTimeout(() => {
+          onMenu(message, touch.clientX, touch.clientY);
+          pressTimer.current = null;
+        }, 500);
+      }}
+      onTouchMove={(event) => {
+        const origin = pressOrigin.current;
+        const touch = event.touches[0];
+        if (!origin || !touch) return;
+        if (Math.abs(touch.clientX - origin.x) > 12 || Math.abs(touch.clientY - origin.y) > 12) {
+          cancelPress();
+        }
+      }}
+      onTouchEnd={cancelPress}
+      onTouchCancel={cancelPress}
     >
       <Avatar name={senderName} seed={message.send_id} size={30} />
       <div className="min-w-0">
