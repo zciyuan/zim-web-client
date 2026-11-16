@@ -24,6 +24,17 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Search / quote jump highlight. */
+@keyframes zim-flash {
+  0% { background-color: rgba(99, 102, 241, 0.28); }
+  100% { background-color: transparent; }
+}
+
+.zim-flash {
+  border-radius: 0.75rem;
+  animation: zim-flash 1.6s ease-out;
+}
+
 /* Slim scrollbars: chat panes scroll a lot. */
 * {
   scrollbar-width: thin;

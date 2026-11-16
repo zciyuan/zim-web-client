@@ -19,6 +19,8 @@ function Bubble({
   selected,
   onSelect,
   onPreviewImage,
+  onMenu,
+  autoEdit,
 }: {
   message: UiMessage;
   mine: boolean;
@@ -29,6 +31,8 @@ function Bubble({
   selected?: boolean;
   onSelect?: () => void;
   onPreviewImage?: (url: string) => void;
+  onMenu?: (message: UiMessage, x: number, y: number) => void;
+  autoEdit?: boolean;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
@@ -40,6 +44,13 @@ function Bubble({
     && message.status !== 1 && message.status !== 2;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+
+  // The context menu's 「编辑」 opens this bubble's inline editor.
+  useEffect(() => {
+    if (!autoEdit) return;
+    setDraft(text);
+    setEditing(true);
+  }, [autoEdit, text]);
 
   const openImage = () => {
     if (!image) return;
@@ -78,6 +89,11 @@ function Bubble({
       data-state={state}
       data-mine={mine ? 'true' : 'false'}
       data-msg-type={message.msg_type}
+      data-msg-id={message.server_msg_id}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        onMenu?.(message, event.clientX, event.clientY);
+      }}
     >
       <Avatar name={senderName} seed={message.send_id} size={30} />
       <div className="min-w-0">
@@ -528,6 +544,21 @@ export function ChatPanel() {
   const [mergePending, setMergePending] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ message: UiMessage; x: number; y: number } | null>(null);
+  const [editTarget, setEditTarget] = useState<string | null>(null);
+  const [forwardTargets, setForwardTargets] = useState<string[]>([]);
+
+  // Global search / quote jump: scroll the target message into view and flash it.
+  useEffect(() => {
+    const id = state.focusMessageId;
+    if (!id) return;
+    const element = document.querySelector(`[data-msg-id="${id}"]`);
+    if (!element) return;
+    element.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    element.classList.add('zim-flash');
+    const timer = window.setTimeout(() => element.classList.remove('zim-flash'), 1600);
+    return () => window.clearTimeout(timer);
+  }, [state.focusMessageId]);
 
   // Escape closes the image lightbox (keyboard access parity with the X button).
   useEffect(() => {
@@ -791,6 +822,8 @@ export function ChatPanel() {
                   senderName={imStore.senderName(message.send_id)}
                   onForward={setForwardTarget}
                   onPreviewImage={setPreviewImage}
+                onMenu={(target, x, y) => setContextMenu({ message: target, x, y })}
+                autoEdit={Boolean(editTarget) && editTarget === message.server_msg_id}
                   selectable={selectMode}
                   selected={selectedIds.includes(message.server_msg_id)}
                   onSelect={() => {
@@ -870,32 +903,151 @@ export function ChatPanel() {
               ? imStore.groupName(item.group_id)
               : imStore.friendName(item.peer_id);
             return (
-              <button
-                key={item.conversation_id}
-                type="button"
-                className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-[13px] hover:bg-slate-50 dark:hover:bg-slate-800/60"
-                onClick={() => {
-                  const target = forwardTarget;
-                  const pending = mergePending;
-                  const ids = selectedIds;
-                  setForwardTarget(null);
-                  setMergePending(false);
-                  setSelectMode(false);
-                  setSelectedIds([]);
-                  if (pending) {
-                    void imStore.mergeForward(ids, item.conversation_id);
-                  } else if (target) {
-                    void imStore.forwardMessage(target, item.conversation_id);
-                  }
-                }}
-              >
-                <Avatar name={title} seed={item.conversation_id} size={26} />
-                <span className="truncate">{title}</span>
-              </button>
+              <div key={item.conversation_id} className="flex items-center gap-1">
+                <input
+                  type="checkbox"
+                  aria-label={`选择转发目标 ${title}`}
+                  checked={forwardTargets.includes(item.conversation_id)}
+                  onChange={() => {
+                    setForwardTargets((current) => current.includes(item.conversation_id)
+                      ? current.filter((cid) => cid !== item.conversation_id)
+                      : [...current, item.conversation_id]);
+                  }}
+                  className="ml-1 h-3.5 w-3.5 shrink-0"
+                />
+                <button
+                  type="button"
+                  className="flex min-w-0 flex-1 items-center gap-2 rounded-xl px-2 py-2 text-left text-[13px] hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                  onClick={() => {
+                    const target = forwardTarget;
+                    const pending = mergePending;
+                    const ids = selectedIds;
+                    setForwardTarget(null);
+                    setMergePending(false);
+                    setSelectMode(false);
+                    setSelectedIds([]);
+                    setForwardTargets([]);
+                    if (pending) {
+                      void imStore.mergeForward(ids, item.conversation_id);
+                    } else if (target) {
+                      void imStore.forwardMessage(target, item.conversation_id);
+                    }
+                  }}
+                >
+                  <Avatar name={title} seed={item.conversation_id} size={26} />
+                  <span className="truncate">{title}</span>
+                </button>
+              </div>
             );
           })}
         </div>
+        {forwardTargets.length > 0 ? (
+          <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-3 py-2 text-xs dark:border-slate-700">
+            <span>已选 {forwardTargets.length} 个会话</span>
+            <button
+              type="button"
+              data-forward-selected
+              onClick={() => {
+                const target = forwardTarget;
+                const pending = mergePending;
+                const ids = selectedIds;
+                const targets = forwardTargets;
+                setForwardTarget(null);
+                setMergePending(false);
+                setSelectMode(false);
+                setSelectedIds([]);
+                setForwardTargets([]);
+                if (pending) {
+                  void imStore.mergeForward(ids, targets);
+                } else if (target) {
+                  void imStore.forwardMessage(target, targets);
+                }
+              }}
+              className="rounded-lg bg-indigo-600 px-2.5 py-1 font-medium text-white"
+            >
+              转发到已选
+            </button>
+          </div>
+        ) : null}
       </dialog>
+
+      {contextMenu ? (
+        <>
+          <div className="fixed inset-0 z-[55]" onClick={() => setContextMenu(null)} onContextMenu={(event) => {
+            event.preventDefault();
+            setContextMenu(null);
+          }} />
+          <div
+            role="menu"
+            data-message-menu="true"
+            style={{ left: Math.min(contextMenu.x, window.innerWidth - 160), top: Math.min(contextMenu.y, window.innerHeight - 240) }}
+            className="fixed z-[56] w-36 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-xs shadow-xl dark:border-slate-700 dark:bg-slate-900"
+          >
+            <button
+              type="button"
+              data-menu-action="copy"
+              onClick={() => {
+                const body = messageText(contextMenu.message.content, contextMenu.message.msg_type).text;
+                void navigator.clipboard?.writeText(body).then(() => imStore.notify('已复制')).catch(() => imStore.notify('复制失败', 'error'));
+                setContextMenu(null);
+              }}
+              className="block w-full px-3 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              复制
+            </button>
+            <button
+              type="button"
+              data-menu-action="quote"
+              onClick={() => {
+                imStore.setQuoteTarget(contextMenu.message);
+                setContextMenu(null);
+              }}
+              className="block w-full px-3 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              引用
+            </button>
+            <button
+              type="button"
+              data-menu-action="forward"
+              onClick={() => {
+                setForwardTarget(contextMenu.message);
+                setContextMenu(null);
+              }}
+              className="block w-full px-3 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              转发
+            </button>
+            {contextMenu.message.msg_type === 1
+              && String(contextMenu.message.send_id) === String(state.me?.uid ?? '')
+              && contextMenu.message.server_msg_id ? (
+                <button
+                  type="button"
+                  data-menu-action="edit"
+                  onClick={() => {
+                    setEditTarget(contextMenu.message.server_msg_id);
+                    setContextMenu(null);
+                  }}
+                  className="block w-full px-3 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  编辑
+                </button>
+              ) : null}
+            {String(contextMenu.message.send_id) === String(state.me?.uid ?? '') && contextMenu.message.server_msg_id ? (
+              <button
+                type="button"
+                data-menu-action="delete"
+                onClick={() => {
+                  void imStore.deleteMessage(contextMenu.message);
+                  setContextMenu(null);
+                }}
+                className="block w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+              >
+                删除
+              </button>
+            ) : null}
+          </div>
+        </>
+      ) : null}
 
       {previewImage ? (
         <div

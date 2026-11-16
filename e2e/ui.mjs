@@ -884,6 +884,72 @@ const main = async () => {
   );
   await alice.screenshot({ path: path.join(OUT, '23-read.png') });
 
+  step('right-click opens the message menu');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  await alice.evaluate(() => {
+    const bubble = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .find((node) => node.getAttribute('data-mine') === 'true');
+    if (!bubble) throw new Error('no own bubble');
+    const rect = bubble.getBoundingClientRect();
+    bubble.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      clientX: rect.left + 20,
+      clientY: rect.top + 10,
+    }));
+  });
+  await alice.waitForSelector('[data-message-menu]', { timeout: 10_000 });
+  const menuActions = await alice.evaluate(() => [...document.querySelectorAll('[data-menu-action]')]
+    .map((node) => node.getAttribute('data-menu-action')));
+  assert.ok(menuActions.includes('copy') && menuActions.includes('forward'), `menu actions = ${menuActions}`);
+  await alice.screenshot({ path: path.join(OUT, '30-menu.png') });
+  await alice.evaluate(() => document.querySelector('[data-menu-action="copy"]')?.click());
+  await alice.waitForFunction(() => document.querySelector('[data-message-menu]') === null, { timeout: 10_000 });
+
+  step('global search jumps to a message');
+  await alice.keyboard.down('Control');
+  await alice.keyboard.press('k');
+  await alice.keyboard.up('Control');
+  await alice.waitForSelector('[data-global-search] input', { timeout: 10_000 });
+  await setValue(alice, '[data-global-search] input', 'React 实时消息');
+  await alice.waitForSelector('[data-search-hit="message"]', { timeout: 10_000 });
+  await alice.evaluate(() => document.querySelector('[data-search-hit="message"]')?.click());
+  await alice.waitForFunction(
+    () => Boolean(window.__zim.getSnapshot().focusMessageId),
+    { timeout: 15_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '31-search.png') });
+
+  step('merge forward can target several conversations');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="多选消息"]');
+  await alice.waitForFunction(() => document.querySelectorAll('[aria-label="选择消息"]').length > 0, { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')];
+    for (const node of nodes.slice(-2)) {
+      const box = node.querySelector('input[aria-label="选择消息"]');
+      if (box) box.click();
+    }
+  });
+  await alice.waitForFunction(
+    () => (document.querySelector('[aria-label="聊天"]')?.textContent ?? '').includes('已选 2 条'),
+    { timeout: 10_000 },
+  );
+  await clickByText(alice, 'button', '合并转发');
+  await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const boxes = [...document.querySelectorAll('dialog[open] input[type="checkbox"]')];
+    boxes.slice(0, 2).forEach((box) => box.click());
+  });
+  await alice.waitForSelector('[data-forward-selected]', { timeout: 10_000 });
+  await alice.evaluate(() => document.querySelector('[data-forward-selected]')?.click());
+  await alice.waitForFunction(
+    () => (window.__zim.getSnapshot().toast?.text ?? '').includes('个会话'),
+    { timeout: 20_000 },
+  );
+
   step('conversation can be pinned and unpinned');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');

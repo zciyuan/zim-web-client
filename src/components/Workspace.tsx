@@ -1,11 +1,11 @@
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { Avatar } from './Avatar';
 import { ChatPanel } from './ChatPanel';
 import { AddFriendDialog } from './AddFriendDialog';
 import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
-import { formatListTime, previewConversation } from '../app/format';
+import { formatClock, formatListTime, messagePreview, previewConversation } from '../app/format';
 
 const TABS: { key: Tab; icon: string; label: string }[] = [
   { key: 'conversations', icon: '💬', label: '会话' },
@@ -132,6 +132,28 @@ function Sidebar() {
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [addFriendOpen, setAddFriendOpen] = useState(false);
   const [menuCid, setMenuCid] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [keyword, setKeyword] = useState('');
+  const searchInput = useRef<HTMLInputElement>(null);
+  const results = useMemo(() => imStore.searchAll(keyword), [keyword, state.conversations, state.threads]);
+
+  // Ctrl/Cmd+K opens the global search (Esc closes it).
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setSearchOpen(true);
+        requestAnimationFrame(() => searchInput.current?.focus());
+      }
+      if (event.key === 'Escape') setSearchOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  useEffect(() => {
+    if (searchOpen) searchInput.current?.focus();
+  }, [searchOpen]);
   const title =
     state.tab === 'friends' ? `好友（${state.friends.length}）`
       : state.tab === 'groups' ? `群聊（${state.groups.length}）`
@@ -145,6 +167,15 @@ function Sidebar() {
       <header className="flex items-center justify-between px-4 pt-4 pb-2.5">
         <h2 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h2>
         <span className="flex items-center gap-1">
+          <button
+            type="button"
+            aria-label="全局搜索"
+            aria-expanded={searchOpen}
+            onClick={() => setSearchOpen((open) => !open)}
+            className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+          >
+            🔍
+          </button>
           {state.tab === 'friends' ? (
             <button
               type="button"
@@ -172,6 +203,63 @@ function Sidebar() {
           </button>
         </span>
       </header>
+
+      {searchOpen ? (
+        <div className="px-3 pb-2" data-global-search>
+          <input
+            ref={searchInput}
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            placeholder="搜索会话和已加载的消息（Ctrl+K）"
+            aria-label="全局搜索输入"
+            className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-800"
+          />
+          {keyword.trim() ? (
+            <div className="mt-1.5 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white text-xs dark:border-slate-700 dark:bg-slate-900">
+              {results.conversations.length === 0 && results.messages.length === 0 ? (
+                <p className="px-2.5 py-2 text-slate-500">没有匹配的会话或消息</p>
+              ) : null}
+              {results.conversations.length > 0 ? (
+                <p className="px-2.5 pt-2 text-[11px] text-slate-400">会话</p>
+              ) : null}
+              {results.conversations.map((item) => (
+                <button
+                  key={item.conversation_id}
+                  type="button"
+                  data-search-hit="conversation"
+                  onClick={() => {
+                    setSearchOpen(false);
+                    void imStore.openConversation(item.conversation_id);
+                  }}
+                  className="block w-full truncate px-2.5 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  {imStore.conversationTitle(item)}
+                </button>
+              ))}
+              {results.messages.length > 0 ? (
+                <p className="px-2.5 pt-2 text-[11px] text-slate-400">消息（{results.messages.length}）</p>
+              ) : null}
+              {results.messages.slice(0, 12).map((hit) => (
+                <button
+                  key={`${hit.cid}-${hit.item.server_msg_id || hit.item.client_msg_id}`}
+                  type="button"
+                  data-search-hit="message"
+                  onClick={() => {
+                    setSearchOpen(false);
+                    void imStore.jumpToMessage(hit.cid, hit.item.server_msg_id);
+                  }}
+                  className="block w-full px-2.5 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+                >
+                  <span className="mr-2 text-[10px] text-slate-400">{formatClock(hit.item.send_time)}</span>
+                  <span className="text-slate-700 dark:text-slate-200">
+                    {messagePreview(hit.item.content, hit.item.msg_type)}
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="flex-1 overflow-y-auto px-2 pb-3">
         {state.tab === 'conversations' ? (
@@ -382,6 +470,14 @@ function Sidebar() {
 }
 
 export function Workspace() {
+  const state = useIm();
+  const unread = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
+
+  // Keep the tab title in sync with the unread total (classic IM affordance).
+  useEffect(() => {
+    document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) ZIM` : 'ZIM';
+  }, [unread]);
+
   return (
     <div className="flex h-full bg-slate-100 dark:bg-slate-950">
       <Rail />

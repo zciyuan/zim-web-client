@@ -145,6 +145,8 @@ export interface ImState {
   theme: ThemeMode;
   /** conversation id -> read seq captured when it was opened (unread divider) */
   unreadAnchors: Record<string, number>;
+  /** message to scroll to and flash (global search / quote jump) */
+  focusMessageId: string | null;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -184,6 +186,7 @@ const initialState: ImState = {
   notifications: typeof localStorage !== 'undefined' && localStorage.getItem('zim.notifications') === '1',
   theme: (typeof localStorage !== 'undefined' ? (localStorage.getItem('zim.theme') as ThemeMode | null) : null) ?? 'system',
   unreadAnchors: {},
+  focusMessageId: null,
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -1189,6 +1192,42 @@ class ImStore {
 
   // ------------------------------------------------------------------ read --
 
+  /** Marks a message for scroll-into-view and a short highlight flash. */
+  focusMessage(messageId: string): void {
+    if (!messageId) return;
+    this.set({ focusMessageId: null });
+    requestAnimationFrame(() => this.set({ focusMessageId: messageId }));
+  }
+
+  /** Opens the conversation holding a message and highlights that message. */
+  async jumpToMessage(cid: string, messageId: string): Promise<void> {
+    if (!cid) return;
+    await this.openConversation(cid);
+    this.focusMessage(messageId);
+  }
+
+  /** Local search: conversation titles plus the threads already in memory. */
+  searchAll(keyword: string): {
+    conversations: Conversation[];
+    messages: { cid: string; item: UiMessage }[];
+  } {
+    const needle = keyword.trim().toLowerCase();
+    if (!needle) return { conversations: [], messages: [] };
+    const conversations = this.state.conversations
+      .filter((item) => this.conversationTitle(item).toLowerCase().includes(needle))
+      .slice(0, 6);
+    const messages: { cid: string; item: UiMessage }[] = [];
+    for (const [cid, thread] of Object.entries(this.state.threads)) {
+      for (const item of thread.items) {
+        if (messages.length >= 30) break;
+        const text = messageText(item.content, item.msg_type).text;
+        if (text && text.toLowerCase().includes(needle)) messages.push({ cid, item });
+      }
+      if (messages.length >= 30) break;
+    }
+    return { conversations, messages };
+  }
+
   /** Pins/unpins a conversation (server sorts pinned chats first). */
   async pinConversation(cid: string, pinned: boolean): Promise<void> {
     try {
@@ -1451,65 +1490,87 @@ class ImStore {
     }
   }
 
-  /** 1503: forwards several messages as one chat-record card. */
-  async mergeForward(serverMsgIds: string[], targetCid: string): Promise<void> {
-    if (!this.client || serverMsgIds.length === 0) return;
-    // Derive ids from the conversation id: REST group ids lose precision.
-    const [kind, first, second] = targetCid.split('_');
+  /** Splits a conversation id into exact send targets (REST group ids lose precision). */
+  private targetOf(cid: string): { groupId?: string; recvId?: string } | null {
+    const [kind, first, second] = cid.split('_');
     const selfUid = String(this.state.me?.uid ?? '');
-    const groupId = kind === 'g' ? first : undefined;
-    const recvId = kind === 's' ? (first === selfUid ? second : first) : undefined;
-    if (!groupId && !recvId) {
+    if (kind === 'g' && first) return { groupId: first };
+    if (kind === 's' && first && second) {
+      return { recvId: first === selfUid ? second : first };
+    }
+    return null;
+  }
+
+  /** 1503: forwards several messages as one chat-record card. */
+  async mergeForward(serverMsgIds: string[], targetCids: string | string[]): Promise<void> {
+    if (!this.client || serverMsgIds.length === 0) return;
+    const targets = (Array.isArray(targetCids) ? targetCids : [targetCids]).filter(Boolean);
+    if (targets.length === 0) {
       this.notify('转发目标无效', 'error');
       return;
     }
-    try {
-      await this.client.request(
-        OP.MERGE,
-        encodeMergeReq({
-          clientMsgId: crypto.randomUUID(),
-          recvId,
-          groupId,
-          serverMsgIds,
-          title: '聊天记录',
-        }),
-        decodeMergeRes,
-      );
-      await this.refreshConversations();
-      this.notify(`已合并转发 ${serverMsgIds.length} 条消息`);
-    } catch (err) {
-      this.notify(`合并转发失败：${wrapError(err).display}`, 'error');
+    let sent = 0;
+    for (const cid of targets) {
+      const target = this.targetOf(cid);
+      if (!target) continue;
+      try {
+        await this.client.request(
+          OP.MERGE,
+          encodeMergeReq({
+            clientMsgId: crypto.randomUUID(),
+            recvId: target.recvId,
+            groupId: target.groupId,
+            serverMsgIds,
+            title: '聊天记录',
+          }),
+          decodeMergeRes,
+        );
+        sent += 1;
+      } catch (err) {
+        this.notify(`合并转发失败：${wrapError(err).display}`, 'error');
+      }
     }
+    if (sent === 0) return;
+    await this.refreshConversations();
+    this.notify(`已合并转发 ${serverMsgIds.length} 条消息${sent > 1 ? ` 到 ${sent} 个会话` : ''}`);
   }
 
-  /** Forwards one message into another conversation (text or attachment). */
-  async forwardMessage(message: UiMessage, targetCid: string): Promise<void> {
-    const conversation = this.conversation(targetCid);
-    if (!conversation || !this.client) return;
+  /** Forwards one message into other conversations (text or attachment). */
+  async forwardMessage(message: UiMessage, targetCids: string | string[]): Promise<void> {
+    if (!this.client) return;
     if (!message.server_msg_id) {
       this.notify('消息尚未发送完成，无法转发', 'error');
       return;
     }
-    try {
-      const payload = conversation.type === 2
-        ? encodeSendGroupReq({
-          clientMsgId: crypto.randomUUID(),
-          groupId: conversation.group_id,
-          msgType: message.msg_type,
-          content: message.content,
-        })
-        : encodeSendSingleReq({
-          clientMsgId: crypto.randomUUID(),
-          recvId: conversation.peer_id,
-          msgType: message.msg_type,
-          content: message.content,
-        });
-      await this.client.request(conversation.type === 2 ? OP.SEND_GROUP : OP.SEND_SINGLE, payload, decodeSendRes);
-      await this.refreshConversations();
-      this.notify('已转发');
-    } catch (err) {
-      this.notify(`转发失败：${wrapError(err).display}`, 'error');
+    const targets = (Array.isArray(targetCids) ? targetCids : [targetCids]).filter(Boolean);
+    if (targets.length === 0) return;
+    let sent = 0;
+    for (const cid of targets) {
+      const target = this.targetOf(cid);
+      if (!target) continue;
+      try {
+        const payload = target.groupId
+          ? encodeSendGroupReq({
+            clientMsgId: crypto.randomUUID(),
+            groupId: target.groupId,
+            msgType: message.msg_type,
+            content: message.content,
+          })
+          : encodeSendSingleReq({
+            clientMsgId: crypto.randomUUID(),
+            recvId: target.recvId as string,
+            msgType: message.msg_type,
+            content: message.content,
+          });
+        await this.client.request(target.groupId ? OP.SEND_GROUP : OP.SEND_SINGLE, payload, decodeSendRes);
+        sent += 1;
+      } catch (err) {
+        this.notify(`转发失败：${wrapError(err).display}`, 'error');
+      }
     }
+    if (sent === 0) return;
+    await this.refreshConversations();
+    this.notify(sent > 1 ? `已转发到 ${sent} 个会话` : '已转发');
   }
 
   private async deliver(draft: UiMessage, conversation: Conversation): Promise<void> {
