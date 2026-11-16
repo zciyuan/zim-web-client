@@ -62,7 +62,7 @@ export function CallOverlay() {
         className="w-[min(560px,94vw)] overflow-hidden rounded-3xl border border-slate-700 bg-slate-900 text-slate-100 shadow-2xl"
       >
         <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2 text-xs text-slate-400">
-          <span>{video ? '视频通话' : '语音通话'}</span>
+          <span>{call.targetType === 2 ? '群' : ''}{video ? '视频通话' : '语音通话'}</span>
           <span>{call.phase === 'active' ? clock(elapsed) : '等待接通'}</span>
         </div>
 

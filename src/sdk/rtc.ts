@@ -20,6 +20,7 @@ export interface CallAnswerPush {
   room: string;
   token: string;
   sfu_url: string;
+  target_type: number;
 }
 
 /** 1801 CallInviteReq { call_id=1; CallTarget target=2; media=3; extra=4; } */
@@ -59,7 +60,7 @@ export const encodeCallAnswerReq = (req: { callId: string; accept: boolean }): U
 export const decodeCallAnswer = (bytes: Uint8Array): CallAnswerPush => {
   const result: CallAnswerPush = {
     call_id: '', phase: 0, from_uid: '0', from_nickname: '', from_avatar: '',
-    media: 1, room: '', token: '', sfu_url: '',
+    media: 1, room: '', token: '', sfu_url: '', target_type: 1,
   };
   decodeFields(bytes, (reader, field, wire) => {
     switch (field) {
@@ -72,6 +73,7 @@ export const decodeCallAnswer = (bytes: Uint8Array): CallAnswerPush => {
       case 7: result.room = reader.string(); break;
       case 8: result.token = reader.string(); break;
       case 9: result.sfu_url = reader.string(); break;
+      case 10: result.target_type = reader.int32(); break;
       default: reader.skip(wire);
     }
   });

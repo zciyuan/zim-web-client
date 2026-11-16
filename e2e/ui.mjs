@@ -544,6 +544,48 @@ const main = async () => {
     { timeout: 20_000 },
   );
 
+  step('group voice call rings every member');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'E2E 群', 'E2E 群', '[aria-label="聊天"] header');
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '语音');
+    if (!button) throw new Error('group call button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'group caller should be outgoing');
+  assert.equal(await waitCallPhase(bob, ['incoming']), 'incoming', 'group member should ring');
+  assert.equal(
+    await bob.evaluate(() => window.__zim.getSnapshot().call.targetType),
+    2,
+    'group calls carry targetType=2',
+  );
+  await bob.bringToFront();
+  await bob.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
+      .find((item) => item.textContent === '接听');
+    if (!button) throw new Error('group accept button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'group member should join');
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'group caller should be active');
+  await alice.bringToFront();
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
+      .find((item) => item.textContent === '挂断');
+    if (!button) throw new Error('group hangup button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'group caller should hang up');
+  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'group member sheet should close');
+  await alice.waitForFunction(
+    () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes('群通话')),
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '20-group-call.png') });
+
   step('quote reply carries the quoted snippet');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');

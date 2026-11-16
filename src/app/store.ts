@@ -237,6 +237,10 @@ export interface CallStatus {
   phase: CallPhase;
   callId: string;
   media: 1 | 2;
+  /** 1 direct / 2 group */
+  targetType: 1 | 2;
+  /** group calls: another member already joined */
+  joinedElsewhere: boolean;
   peerId: string;
   peerName: string;
   room: string;
@@ -248,8 +252,8 @@ export interface CallStatus {
 
 function emptyCall(): CallStatus {
   return {
-    phase: 'idle', callId: '', media: 1, peerId: '', peerName: '', room: '',
-    startedAt: 0, muted: false, videoOn: true, error: '',
+    phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false,
+    peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
   };
 }
 
@@ -1669,6 +1673,7 @@ class ImStore {
       return;
     }
     if (!update.call_id) return;
+    if (import.meta.env.DEV) console.debug(`[zim] call push phase=${update.phase} target=${update.target_type} media=${update.media}`);
     switch (update.phase) {
       case 1:
         // Ringing: the callee shows the incoming call sheet.
@@ -1677,6 +1682,8 @@ class ImStore {
             phase: 'incoming',
             callId: update.call_id,
             media: update.media === 2 ? 2 : 1,
+            targetType: update.target_type === 2 ? 2 : 1,
+            joinedElsewhere: false,
             peerId: update.from_uid,
             peerName: update.from_nickname || `用户 ${update.from_uid}`,
             room: update.room,
@@ -1705,22 +1712,26 @@ class ImStore {
     }
   }
 
-  /** Starts an outgoing call in the active direct conversation. */
+  /** Starts an outgoing call in the active conversation (direct or group). */
   async startCall(media: 1 | 2): Promise<void> {
     const conversation = this.conversation(this.state.activeCid);
-    if (!conversation || conversation.type !== 1 || !this.client) {
-      this.notify('只能在单聊里发起通话', 'error');
+    if (!conversation || !this.client) {
+      this.notify('请先打开一个会话', 'error');
       return;
     }
     if (this.state.call.phase !== 'idle') return;
     const callId = crypto.randomUUID();
-    const peerId = String(conversation.peer_id);
-    const peer = this.friendProfile(peerId);
+    const isGroup = conversation.type === 2;
+    const targetType: 1 | 2 = isGroup ? 2 : 1;
+    const peerId = String(isGroup ? conversation.group_id : conversation.peer_id);
+    const peer = isGroup ? this.groupName(peerId) : this.friendProfile(peerId);
     this.set({
       call: {
         phase: 'outgoing',
         callId,
         media,
+        targetType,
+        joinedElsewhere: false,
         peerId,
         peerName: peer,
         room: '',
@@ -1734,7 +1745,7 @@ class ImStore {
     try {
       const res = await this.client.request(
         OP.CALL_INVITE,
-        encodeCallInviteReq({ callId, targetType: 1, targetId: peerId, media }),
+        encodeCallInviteReq({ callId, targetType, targetId: peerId, media }),
         decodeCallInviteRes,
       );
       this.set({ call: { ...this.state.call, room: res.payload.room } });
@@ -1868,8 +1879,8 @@ class ImStore {
     await callSession.end().catch(() => undefined);
     this.set({
       call: {
-        phase: 'idle', callId: '', media: 1, peerId: '', peerName: '', room: '',
-        startedAt: 0, muted: false, videoOn: true, error: '',
+        phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false,
+        peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
       },
     });
   }
