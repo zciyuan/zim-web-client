@@ -443,6 +443,25 @@ const main = async () => {
   await jsClick(alice, '[aria-label="关闭预览"]');
   await alice.waitForFunction(() => document.querySelector('[data-image-preview]') === null, { timeout: 10_000 });
 
+  step('dragging a file into the chat sends it');
+  await alice.bringToFront();
+  const before = await alice.evaluate(() => document.querySelectorAll('[aria-label="聊天"] .message-enter').length);
+  await alice.evaluate(async () => {
+    const response = await fetch('/icon-192.png');
+    const blob = await response.blob();
+    const file = new File([blob], 'dropped.png', { type: 'image/png' });
+    const data = new DataTransfer();
+    data.items.add(file);
+    const target = document.querySelector('[aria-label="聊天"]');
+    target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: data }));
+    target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data }));
+  });
+  await alice.waitForFunction(
+    (count) => document.querySelectorAll('[aria-label="聊天"] .message-enter').length > count,
+    { timeout: 30_000 },
+    before,
+  );
+
   step('voice message records and sends');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="录制语音"]');
@@ -864,6 +883,35 @@ const main = async () => {
     { timeout: 20_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '23-read.png') });
+
+  step('conversation can be pinned and unpinned');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  const bobRow = await alice.evaluate(() => {
+    const row = [...document.querySelectorAll('[data-conversation-row]')]
+      .find((node) => (node.textContent ?? '').includes('Bob'));
+    return row?.getAttribute('data-conversation-row') ?? '';
+  });
+  assert.ok(bobRow, 'Bob conversation row not found');
+  await jsClick(alice, `[data-conversation-menu="${bobRow}"]`);
+  await alice.waitForSelector('[data-conversation-actions]', { timeout: 10_000 });
+  await jsClick(alice, '[data-pin-action]');
+  await alice.waitForFunction(
+    (cid) => Number(window.__zim.getSnapshot().conversations
+      .find((item) => item.conversation_id === cid)?.is_pinned ?? 0) === 1,
+    { timeout: 15_000 },
+    bobRow,
+  );
+  await jsClick(alice, `[data-conversation-menu="${bobRow}"]`);
+  await alice.waitForSelector('[data-conversation-actions]', { timeout: 10_000 });
+  await jsClick(alice, '[data-pin-action]');
+  await alice.waitForFunction(
+    (cid) => Number(window.__zim.getSnapshot().conversations
+      .find((item) => item.conversation_id === cid)?.is_pinned ?? 0) === 0,
+    { timeout: 15_000 },
+    bobRow,
+  );
+  await alice.screenshot({ path: path.join(OUT, '29-pin.png') });
 
   step('typing indicator reaches the peer');
   // Bob types without sending; Alice's header shows the typing hint.

@@ -1189,6 +1189,34 @@ class ImStore {
 
   // ------------------------------------------------------------------ read --
 
+  /** Pins/unpins a conversation (server sorts pinned chats first). */
+  async pinConversation(cid: string, pinned: boolean): Promise<void> {
+    try {
+      await this.rest.pinConversation(cid, pinned);
+      await this.refreshConversations();
+      this.notify(pinned ? '已置顶会话' : '已取消置顶');
+    } catch (err) {
+      this.notify(`置顶失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** Removes a conversation from this account's list (history stays on the server). */
+  async deleteConversation(cid: string): Promise<void> {
+    try {
+      await this.rest.deleteConversation(cid);
+      const threads = { ...this.state.threads };
+      delete threads[cid];
+      this.set({
+        conversations: this.state.conversations.filter((item) => item.conversation_id !== cid),
+        threads,
+        activeCid: this.state.activeCid === cid ? null : this.state.activeCid,
+      });
+      this.notify('会话已删除');
+    } catch (err) {
+      this.notify(`删除失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
   async markRead(cid: string): Promise<void> {
     const conversation = this.conversation(cid);
     const thread = this.state.threads[cid];

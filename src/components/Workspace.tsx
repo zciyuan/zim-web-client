@@ -131,6 +131,7 @@ function Sidebar() {
   const state = useIm();
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [addFriendOpen, setAddFriendOpen] = useState(false);
+  const [menuCid, setMenuCid] = useState<string | null>(null);
   const title =
     state.tab === 'friends' ? `好友（${state.friends.length}）`
       : state.tab === 'groups' ? `群聊（${state.groups.length}）`
@@ -185,12 +186,13 @@ function Sidebar() {
                 const unread = Number(conversation.unread ?? 0);
                 const active = state.activeCid === conversation.conversation_id;
                 return (
+                  <div key={conversation.conversation_id} className="group relative">
                   <button
-                    key={conversation.conversation_id}
                     type="button"
                     onClick={() => void imStore.openConversation(conversation.conversation_id)}
                     aria-current={active}
-                    className={`flex w-full items-center gap-2.5 rounded-xl p-2.5 text-left transition ${
+                    data-conversation-row={conversation.conversation_id}
+                    className={`flex w-full items-center gap-2.5 rounded-xl p-2.5 pr-8 text-left transition ${
                       active ? 'bg-indigo-50 dark:bg-indigo-950/60' : 'hover:bg-slate-50 dark:hover:bg-slate-800/60'
                     }`}
                   >
@@ -216,6 +218,45 @@ function Sidebar() {
                       <span className="shrink-0 rounded border border-indigo-400 px-1 text-[10px] text-indigo-500">群</span>
                     ) : null}
                   </button>
+                  <button
+                    type="button"
+                    aria-label="会话操作"
+                    data-conversation-menu={conversation.conversation_id}
+                    onClick={() => setMenuCid(menuCid === conversation.conversation_id ? null : conversation.conversation_id)}
+                    className="absolute right-1.5 top-1.5 grid h-6 w-6 place-items-center rounded-lg border border-slate-200 bg-white text-[11px] text-slate-500 opacity-0 transition group-hover:opacity-100 dark:border-slate-700 dark:bg-slate-900"
+                  >
+                    ⋯
+                  </button>
+                  {menuCid === conversation.conversation_id ? (
+                    <div
+                      data-conversation-actions
+                      className="absolute right-1.5 top-8 z-20 w-28 overflow-hidden rounded-xl border border-slate-200 bg-white py-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900"
+                    >
+                      <button
+                        type="button"
+                        data-pin-action
+                        onClick={() => {
+                          setMenuCid(null);
+                          void imStore.pinConversation(conversation.conversation_id, !Number(conversation.is_pinned ?? 0));
+                        }}
+                        className="block w-full px-3 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+                      >
+                        {Number(conversation.is_pinned ?? 0) ? '取消置顶' : '置顶会话'}
+                      </button>
+                      <button
+                        type="button"
+                        data-delete-action
+                        onClick={() => {
+                          setMenuCid(null);
+                          void imStore.deleteConversation(conversation.conversation_id);
+                        }}
+                        className="block w-full px-3 py-1.5 text-left text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40"
+                      >
+                        删除会话
+                      </button>
+                    </div>
+                  ) : null}
+                  </div>
                 );
               })
           )

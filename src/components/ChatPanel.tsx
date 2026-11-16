@@ -527,6 +527,7 @@ export function ChatPanel() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [mergePending, setMergePending] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
 
   // Escape closes the image lightbox (keyboard access parity with the X button).
   useEffect(() => {
@@ -594,7 +595,27 @@ export function ChatPanel() {
       : `用户 ${conversation.peer_id} · 会话 ${conversation.conversation_id}`;
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-slate-100 dark:bg-slate-950" aria-label="聊天">
+    <section
+      className="flex min-w-0 flex-1 flex-col bg-slate-100 dark:bg-slate-950"
+      aria-label="聊天"
+      onDragOver={(event) => {
+        if (!event.dataTransfer?.types.includes('Files')) return;
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(event) => {
+        if (event.currentTarget === event.target) setDragging(false);
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDragging(false);
+        const files = Array.from(event.dataTransfer?.files ?? []);
+        for (const file of files) {
+          if (file.type.startsWith('image/')) void imStore.sendImage(file);
+          else void imStore.sendAttachment(file);
+        }
+      }}
+    >
       <header className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
         <div className="flex min-w-0 items-center gap-2">
           <button
@@ -711,7 +732,18 @@ export function ChatPanel() {
         </div>
       ) : null}
 
-      <div ref={scrollRef} className="flex flex-1 flex-col overflow-y-auto px-4 py-4">
+      <div
+        ref={scrollRef}
+        className="relative flex flex-1 flex-col overflow-y-auto px-4 py-4"
+      >
+        {dragging ? (
+          <div
+            data-drag-overlay="true"
+            className="pointer-events-none absolute inset-2 z-10 grid place-items-center rounded-2xl border-2 border-dashed border-indigo-400 bg-indigo-50/80 text-sm font-medium text-indigo-600 dark:bg-indigo-950/70 dark:text-indigo-300"
+          >
+            松开即可发送图片或文件
+          </div>
+        ) : null}
         <div className="mt-auto flex flex-col gap-2.5">
           {thread?.hasMoreOlder ? (
             <button
