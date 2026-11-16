@@ -638,6 +638,11 @@ const main = async () => {
   });
   assert.equal(await waitCallPhase(bob, ['active']), 'active', 'group member should join');
   assert.equal(await waitCallPhase(alice, ['active']), 'active', 'group caller should be active');
+  // Both parties are in the SFU room: the sheet lists at least two members.
+  await alice.waitForFunction(
+    () => Number(document.querySelector('[data-participants]')?.getAttribute('data-participants') ?? 0) >= 2,
+    { timeout: 15_000 },
+  );
   await alice.bringToFront();
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="通话"] button')]

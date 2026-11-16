@@ -254,6 +254,8 @@ export interface CallStatus {
   targetType: 1 | 2;
   /** group calls: another member already joined */
   joinedElsewhere: boolean;
+  /** group calls: identities currently in the SFU room */
+  participants: string[];
   peerId: string;
   peerName: string;
   room: string;
@@ -265,7 +267,7 @@ export interface CallStatus {
 
 function emptyCall(): CallStatus {
   return {
-    phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false,
+    phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [],
     peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
   };
 }
@@ -1872,6 +1874,7 @@ class ImStore {
             media: update.media === 2 ? 2 : 1,
             targetType: update.target_type === 2 ? 2 : 1,
             joinedElsewhere: false,
+            participants: [],
             peerId: update.from_uid,
             peerName: update.from_nickname || `用户 ${update.from_uid}`,
             room: update.room,
@@ -1885,9 +1888,25 @@ class ImStore {
       case 2:
         // Answered by the peer (caller side) or auto-answered (family).
         if (this.state.call.callId !== update.call_id) return;
-        if (this.state.call.phase === 'outgoing' || this.state.call.phase === 'connecting') {
+        if (this.state.call.phase === 'incoming') {
+          this.set({ call: { ...this.state.call, joinedElsewhere: true } });
+          return;
+        }
+        {
+          const selfUid = String(this.state.me?.uid ?? '');
+          const participants = Array.from(new Set([
+            ...this.state.call.participants,
+            selfUid,
+            ...(update.from_uid ? [String(update.from_uid)] : []),
+          ].filter(Boolean)));
           this.set({
-            call: { ...this.state.call, phase: 'active', room: update.room || this.state.call.room, startedAt: Date.now() },
+            call: {
+              ...this.state.call,
+              phase: 'active',
+              participants,
+              room: update.room || this.state.call.room,
+              startedAt: this.state.call.startedAt || Date.now(),
+            },
           });
         }
         break;
@@ -1931,6 +1950,7 @@ class ImStore {
         media,
         targetType,
         joinedElsewhere: false,
+        participants: [],
         peerId,
         peerName: peer,
         room: '',
@@ -2078,7 +2098,7 @@ class ImStore {
     await callSession.end().catch(() => undefined);
     this.set({
       call: {
-        phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false,
+        phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [],
         peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
       },
     });

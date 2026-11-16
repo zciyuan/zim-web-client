@@ -89,6 +89,20 @@ export function CallOverlay() {
           ) : null}
         </div>
 
+        {call.targetType === 2 ? (
+          <div
+            data-participants={call.participants.length}
+            className="flex flex-wrap items-center gap-1.5 border-t border-slate-800 px-4 py-2 text-[11px] text-slate-300"
+          >
+            <span className="text-slate-400">通话成员 {call.participants.length}</span>
+            {call.participants.map((uid) => (
+              <span key={uid} className="rounded-full bg-slate-800 px-2 py-0.5">
+                {imStore.senderName(uid)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
         <div className="flex items-center justify-center gap-3 px-4 py-4">
           {call.phase === 'incoming' ? (
             <>
