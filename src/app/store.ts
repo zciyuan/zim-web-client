@@ -714,6 +714,7 @@ class ImStore {
   }
 
   async openConversation(cid: string): Promise<void> {
+    if (this.state.activeCid !== cid) this.set({ searchHighlight: '' });
     this.set({ activeCid: cid, tab: this.state.tab === 'friends' || this.state.tab === 'groups' ? 'conversations' : this.state.tab });
     const conversation = this.conversation(cid);
     if (!conversation) return;
@@ -1362,12 +1363,15 @@ class ImStore {
   /** Opens the conversation holding a message and highlights that message. */
   async jumpToMessage(cid: string, messageId: string, keyword = ''): Promise<void> {
     if (!cid) return;
-    this.set({ searchHighlight: keyword.trim() });
+    const switching = this.state.activeCid !== cid;
+    if (switching) this.set({ searchHighlight: '' });
     try {
       await this.openConversation(cid);
     } catch {
       // The conversation may fail to load; still mark the target message.
     }
+    // Set the keyword after the switch so openConversation cannot clear it.
+    this.set({ searchHighlight: keyword.trim() });
     this.focusMessage(messageId);
   }
 

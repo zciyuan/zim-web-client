@@ -511,14 +511,17 @@ function Composer({ disabled }: { disabled: boolean }) {
       uid: String(friend.friend_id),
       name: imStore.friendName(String(friend.friend_id)),
     }));
-  const mentionCandidates = mentionQuery === null
-    ? []
-    : mentionPool
-      .filter((member) => {
-        const needle = mentionQuery.toLowerCase();
-        return !needle || member.name.toLowerCase().includes(needle) || member.uid.includes(needle);
-      })
-      .slice(0, 6);
+  const mentionCandidates = (() => {
+    if (mentionQuery === null) return [] as { uid: string; name: string }[];
+    const needle = mentionQuery.toLowerCase();
+    const members = mentionPool
+      .filter((member) => !needle || member.name.toLowerCase().includes(needle) || member.uid.includes(needle));
+    // "@所有人" is offered first in group chats.
+    const all = isGroupChat && (!needle || '所有人'.includes(needle) || 'all'.includes(needle))
+      ? [{ uid: 'all', name: '所有人' }]
+      : [];
+    return [...all, ...members].slice(0, 7);
+  })();
 
   const pickMention = (member: { uid: string; name: string }) => {
     const el = inputRef.current;
@@ -1201,7 +1204,7 @@ export function ChatPanel() {
                 autoEdit={Boolean(editTarget) && editTarget === message.server_msg_id}
                 canRetryUpload={state.uploadRetries.includes(message.client_msg_id)}
                 onRetryUpload={() => void imStore.retryUpload(message.client_msg_id)}
-                highlight={state.focusMessageId === message.server_msg_id ? state.searchHighlight : undefined}
+                highlight={state.searchHighlight || undefined}
                   selectable={selectMode}
                   selected={selectedIds.includes(message.server_msg_id)}
                   onSelect={() => {

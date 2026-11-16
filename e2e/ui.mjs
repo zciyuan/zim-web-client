@@ -93,6 +93,10 @@ const loginAs = async (page, username) => {
 
 const openConversationWith = async (page, name) => {
   for (let attempt = 0; attempt < 6; attempt += 1) {
+    // The list may still be loading right after login: wait for the row.
+    await page.waitForFunction((needle) => [...document.querySelectorAll('[aria-label="列表"] button')]
+      .some((item) => (item.querySelector('[data-row-title]')?.textContent ?? item.textContent ?? '').includes(needle)),
+    { timeout: 15_000 }, name).catch(() => undefined);
     // Match the row title, not the whole row: previews may contain the name.
     const clicked = await page.evaluate((needle) => {
       const row = [...document.querySelectorAll('[aria-label="列表"] button')]
@@ -163,7 +167,10 @@ const main = async () => {
   const errors = [];
 
   const alice = await browser.newPage();
-  alice.on('pageerror', (err) => errors.push(`alice pageerror: ${err.message}`));
+  alice.on('pageerror', (err) => {
+    errors.push(`alice pageerror: ${err.message}`);
+    console.log('  alice pageerror:', String(err.message).slice(0, 200));
+  });
   alice.on('console', (msg) => {
     if (msg.type() !== 'error') return;
     // Stale dev attachments (container recreate wipes /app/run/upload) and
@@ -1284,7 +1291,12 @@ const main = async () => {
 
   step('search keyword is highlighted in the message');
   await alice.bringToFront();
-  await jsClick(alice, '[aria-label="消息搜索"]');
+  // Open only if a previous step left the panel closed (the button toggles).
+  await alice.evaluate(() => {
+    if (!document.querySelector('[aria-label="搜索本会话消息"]')) {
+      document.querySelector('[aria-label="消息搜索"]')?.click();
+    }
+  });
   await alice.waitForSelector('[aria-label="搜索本会话消息"]', { timeout: 10_000 });
   await setValue(alice, '[aria-label="搜索本会话消息"]', 'React');
   await alice.evaluate(() => {
@@ -1317,7 +1329,10 @@ const main = async () => {
   await setValue(alice, 'textarea', '@');
   await alice.waitForSelector('[data-mention-picker]', { timeout: 10_000 });
   const mentionName = await alice.evaluate(() => {
-    const option = document.querySelector('[data-mention-option]');
+    // "@所有人" comes first in group chats: pick a member option instead.
+    const options = [...document.querySelectorAll('[data-mention-option]')];
+    const option = options.find((item) => (item.textContent ?? '').includes('Bob'))
+      ?? options.find((item) => item.getAttribute('data-mention-option') !== 'all');
     if (!option) return '';
     const name = option.textContent ?? '';
     option.click();
@@ -1371,7 +1386,8 @@ const main = async () => {
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
   const uploadCdp = await alice.createCDPSession();
-  await uploadCdp.send('Network.setBlockedURLs', { urls: ['*upload*', '*v1/files*'] });
+  await uploadCdp.send('Network.enable');
+  await uploadCdp.send('Network.setBlockedURLs', { urls: ['*upload*', '*v1/files*', '*minio*', '*9000*'] });
   try {
     const retryFile = path.join(OUT, 'e2e-retry.png');
     fs.copyFileSync(path.resolve('public/icon-192.png'), retryFile);
@@ -1405,6 +1421,14 @@ const main = async () => {
 
   step('upload shows a percentage while sending');
   await alice.bringToFront();
+  console.log('  ui diag:', JSON.stringify(await alice.evaluate(() => ({
+    login: Boolean(document.querySelector('form input[autocomplete="username"]')),
+    boundary: Boolean(document.querySelector('[data-error-boundary]')),
+    nav: Boolean(document.querySelector('[aria-label="主导航"]')),
+    hasStore: Boolean(window.__zim),
+    status: window.__zim ? window.__zim.getSnapshot().status : 'none',
+    conn: window.__zim ? window.__zim.getSnapshot().connection : 'none',
+  }))));
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
   const cdp = await alice.createCDPSession();
