@@ -77,6 +77,7 @@ function Bubble({
       className={`message-enter group flex max-w-[82%] gap-2 ${mine ? 'flex-row-reverse self-end' : 'self-start'}`}
       data-state={state}
       data-mine={mine ? 'true' : 'false'}
+      data-msg-type={message.msg_type}
     >
       <Avatar name={senderName} seed={message.send_id} size={30} />
       <div className="min-w-0">
@@ -282,8 +283,67 @@ function Composer({ disabled }: { disabled: boolean }) {
   const quote = state.quoteTarget;
   const [value, setValue] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [recording, setRecording] = useState<{ recorder: MediaRecorder; chunks: Blob[]; startedAt: number } | null>(null);
+  const [recordSeconds, setRecordSeconds] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Voice messages: record in the browser, then upload like any attachment.
+  const startRecording = async () => {
+    if (disabled) {
+      imStore.notify('连接断开，无法录音', 'error');
+      return;
+    }
+    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      imStore.notify('当前浏览器不支持录音', 'error');
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      recorder.start();
+      setRecordSeconds(0);
+      setRecording({ recorder, chunks, startedAt: Date.now() });
+    } catch {
+      imStore.notify('麦克风不可用，请检查浏览器权限', 'error');
+    }
+  };
+
+  const stopRecording = async (keep: boolean) => {
+    const current = recording;
+    if (!current) return;
+    setRecording(null);
+    const { recorder, chunks, startedAt } = current;
+    await new Promise<void>((resolve) => {
+      recorder.onstop = () => resolve();
+      recorder.stop();
+    });
+    recorder.stream.getTracks().forEach((track) => track.stop());
+    if (!keep) return;
+    if (Date.now() - startedAt < 500) {
+      imStore.notify('录音太短，已取消');
+      return;
+    }
+    const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+    if (blob.size === 0) {
+      imStore.notify('没有录到声音', 'error');
+      return;
+    }
+    const file = new File([blob], `voice-${Date.now()}.webm`, { type: blob.type });
+    await imStore.sendAttachment(file);
+  };
+
+  useEffect(() => {
+    if (!recording) return;
+    const timer = window.setInterval(() => {
+      setRecordSeconds(Math.floor((Date.now() - recording.startedAt) / 1000));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [recording]);
 
   const send = () => {
     const text = value.trim();
@@ -372,7 +432,49 @@ function Composer({ disabled }: { disabled: boolean }) {
           onChange={pickFile}
           aria-label="选择附件"
         />
+        <button
+          type="button"
+          onClick={() => (recording ? void stopRecording(true) : void startRecording())}
+          disabled={disabled && !recording}
+          aria-label="录制语音"
+          aria-pressed={Boolean(recording)}
+          title={recording ? '结束并发送语音' : '录制语音消息'}
+          className={`grid h-9 w-9 place-items-center rounded-xl text-lg transition disabled:opacity-40 ${
+            recording
+              ? 'bg-rose-100 text-rose-600 dark:bg-rose-950 dark:text-rose-300'
+              : 'hover:bg-slate-100 dark:hover:bg-slate-800'
+          }`}
+        >
+          {recording ? '⏹' : '🎙️'}
+        </button>
       </div>
+
+      {recording ? (
+        <div
+          data-recording="true"
+          className="mx-2 mb-1 flex items-center gap-2 rounded-lg border border-rose-300 bg-rose-50 px-2 py-1 text-[11px] text-rose-600 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-300"
+        >
+          <span className="h-2 w-2 animate-pulse rounded-full bg-rose-500" />
+          <span data-record-seconds={recordSeconds}>
+            录音中 {Math.floor(recordSeconds / 60)}:{String(recordSeconds % 60).padStart(2, '0')}
+          </span>
+          <span className="flex-1" />
+          <button
+            type="button"
+            onClick={() => void stopRecording(true)}
+            className="rounded-lg bg-rose-600 px-2.5 py-0.5 font-medium text-white"
+          >
+            发送
+          </button>
+          <button
+            type="button"
+            onClick={() => void stopRecording(false)}
+            className="rounded-lg border border-rose-300 px-2.5 py-0.5 dark:border-rose-800"
+          >
+            取消
+          </button>
+        </div>
+      ) : null}
 
       {quote ? (
         <div className="mx-2 mb-1 flex items-start gap-2 rounded-lg border-l-2 border-indigo-400 bg-slate-100 px-2 py-1 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">

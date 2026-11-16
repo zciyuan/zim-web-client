@@ -442,6 +442,15 @@ const main = async () => {
   await alice.keyboard.press('Escape');
   await alice.waitForFunction(() => document.querySelector('[data-image-preview]') === null, { timeout: 10_000 });
 
+  step('voice message records and sends');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="录制语音"]');
+  await alice.waitForSelector('[data-recording="true"]', { timeout: 10_000 });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  await jsClick(alice, '[data-recording="true"] button');
+  await alice.waitForSelector('[aria-label="聊天"] [data-msg-type="3"]', { timeout: 30_000 });
+  await alice.screenshot({ path: path.join(OUT, '27-voice.png') });
+
   step('file attachment produces a file card');
   const attachmentPath = path.join(OUT, 'e2e-attachment.txt');
   fs.mkdirSync(OUT, { recursive: true });

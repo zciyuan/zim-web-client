@@ -142,6 +142,18 @@ export const messageText = (raw: string, msgType: number): { text: string; syste
 export const previewConversation = (conversation: Conversation): string => {
   const brief = conversation.last_msg_brief ?? '';
   if (!brief) return '暂无消息';
+  const parsed = parseContent(brief);
+  if (parsed) {
+    if (parsed.merge) return '[聊天记录]';
+    if (parsed.call_id) return '[通话]';
+    if (typeof parsed.width === 'number' && typeof parsed.url === 'string') return '[图片]';
+    if (typeof parsed.url === 'string') return parsed.name ? `[文件] ${parsed.name}` : '[附件]';
+    if (typeof parsed.text === 'string' && parsed.text) return parsed.text;
+  }
+  // The server may truncate the stored brief, leaving invalid JSON behind.
+  const quoted = brief.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (quoted) return quoted[1].replace(/\\"/g, '"').replace(/\\n/g, ' ');
+  if (brief.startsWith('{')) return '[消息]';
   return messageText(brief, 1).text || '[消息]';
 };
 
