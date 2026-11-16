@@ -434,12 +434,13 @@ const main = async () => {
   await fileInput.uploadFile(path.resolve('public/icon-192.png'));
   await alice.waitForSelector('[aria-label="聊天"] img[alt="图片消息"]', { timeout: 30_000 });
   await alice.screenshot({ path: path.join(OUT, '07-image.png') });
+  assert.ok(await alice.$('[data-day-separator]'), 'day separator is missing');
 
   step('image opens in the in-app lightbox');
   await jsClick(alice, '[data-image-bubble]');
   await alice.waitForSelector('[data-image-preview]', { timeout: 10_000 });
   await alice.screenshot({ path: path.join(OUT, '25-lightbox.png') });
-  await alice.keyboard.press('Escape');
+  await jsClick(alice, '[aria-label="关闭预览"]');
   await alice.waitForFunction(() => document.querySelector('[data-image-preview]') === null, { timeout: 10_000 });
 
   step('voice message records and sends');
@@ -915,6 +916,24 @@ const main = async () => {
     (wsInbox.data?.requests ?? []).some((item) => String(item.from_id) === String(aliceWsUid)),
     `friend inbox missing the WS request: ${JSON.stringify(wsInbox.data)}`,
   );
+
+  step('theme switch toggles the dark class');
+  await alice.bringToFront();
+  const themeBefore = await alice.evaluate(() => document.documentElement.dataset.theme ?? '');
+  await jsClick(alice, '[aria-label="切换主题"]');
+  await jsClick(alice, '[aria-label="切换主题"]');
+  await alice.waitForFunction(
+    () => document.documentElement.dataset.theme === 'dark'
+      && document.documentElement.classList.contains('dark'),
+    { timeout: 10_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '28-dark.png') });
+  await jsClick(alice, '[aria-label="切换主题"]');
+  await alice.waitForFunction(
+    () => document.documentElement.dataset.theme === 'system',
+    { timeout: 10_000 },
+  );
+  console.log(`  theme cycle started at "${themeBefore}"`);
 
   step('desktop notification toggle requests permission');
   await alice.bringToFront();

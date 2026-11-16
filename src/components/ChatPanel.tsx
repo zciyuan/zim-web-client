@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type FormEvent, type KeyboardEvent } from 'react';
 
 import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
 import { attachmentOf, formatBytes, formatDuration, mergeOf, quoteOf } from '../app/format';
-import { formatClock, imageOf, messageText } from '../app/format';
+import { daySeparator, formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
 
@@ -730,25 +730,44 @@ export function ChatPanel() {
             <p className="py-10 text-center text-sm text-slate-500">还没有消息，说点什么吧</p>
           ) : null}
 
-          {thread?.items.map((message) => {
+          {thread?.items.map((message, index) => {
             const mine = String(message.send_id) === String(state.me?.uid ?? '');
+            const previous = index > 0 ? thread.items[index - 1] : undefined;
+            const dayLabel = daySeparator(Number(previous?.send_time ?? 0) || undefined, Number(message.send_time));
+            const anchor = conversation ? state.unreadAnchors[conversation.conversation_id] : undefined;
+            const showUnread = Boolean(anchor)
+              && Number(message.seq) > Number(anchor)
+              && !thread.items.slice(0, index).some((entry) => Number(entry.seq) > Number(anchor));
             return (
-              <Bubble
-                key={message.server_msg_id || message.client_msg_id}
-                message={message}
-                mine={mine}
-                showSender={Boolean(isGroup)}
-                senderName={imStore.senderName(message.send_id)}
-                onForward={setForwardTarget}
-                onPreviewImage={setPreviewImage}
-                selectable={selectMode}
-                selected={selectedIds.includes(message.server_msg_id)}
-                onSelect={() => {
-                  const id = message.server_msg_id;
-                  if (!id) return;
-                  setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
-                }}
-              />
+              <Fragment key={message.server_msg_id || message.client_msg_id}>
+                {dayLabel ? (
+                  <div data-day-separator className="self-center rounded-full bg-slate-200/70 px-2.5 py-0.5 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                    {dayLabel}
+                  </div>
+                ) : null}
+                {showUnread ? (
+                  <div data-unread-divider className="flex items-center gap-2 self-stretch px-2 text-[11px] text-indigo-500">
+                    <span className="h-px flex-1 bg-indigo-300 dark:bg-indigo-800" />
+                    以下为新消息
+                    <span className="h-px flex-1 bg-indigo-300 dark:bg-indigo-800" />
+                  </div>
+                ) : null}
+                <Bubble
+                  message={message}
+                  mine={mine}
+                  showSender={Boolean(isGroup)}
+                  senderName={imStore.senderName(message.send_id)}
+                  onForward={setForwardTarget}
+                  onPreviewImage={setPreviewImage}
+                  selectable={selectMode}
+                  selected={selectedIds.includes(message.server_msg_id)}
+                  onSelect={() => {
+                    const id = message.server_msg_id;
+                    if (!id) return;
+                    setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+                  }}
+                />
+              </Fragment>
             );
           })}
           {!isGroup && readState ? (

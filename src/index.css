@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Manual theme switch: dark: responds to the .dark class on <html>. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --color-brand: #5b6cff;
   --color-brand-soft: #eceefe;

@@ -131,6 +131,8 @@ export interface Toast {
   kind: 'info' | 'error';
 }
 
+export type ThemeMode = 'system' | 'light' | 'dark';
+
 export interface ImState {
   status: AppStatus;
   authError: string;
@@ -139,6 +141,10 @@ export interface ImState {
   typing: Record<string, { uid: string; until: number }>;
   /** desktop notifications enabled and permitted */
   notifications: boolean;
+  /** color theme preference */
+  theme: ThemeMode;
+  /** conversation id -> read seq captured when it was opened (unread divider) */
+  unreadAnchors: Record<string, number>;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -176,6 +182,8 @@ const initialState: ImState = {
   typing: {},
   peerReads: {},
   notifications: typeof localStorage !== 'undefined' && localStorage.getItem('zim.notifications') === '1',
+  theme: (typeof localStorage !== 'undefined' ? (localStorage.getItem('zim.theme') as ThemeMode | null) : null) ?? 'system',
+  unreadAnchors: {},
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -298,6 +306,45 @@ class ImStore {
   private restorePromise: Promise<void> | null = null;
   /** Pushes that arrived while a thread page was still loading, keyed by cid. */
   private pendingPushes = new Map<string, UiMessage[]>();
+
+  constructor() {
+    this.applyTheme();
+    // "system" keeps following the OS while the app runs.
+    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+        if (this.state.theme === 'system') this.applyTheme();
+      });
+    }
+  }
+
+  /** Applies the current theme preference to <html> (adds/removes .dark). */
+  private applyTheme(): void {
+    if (typeof document === 'undefined') return;
+    const mode = this.state.theme;
+    const dark = mode === 'dark'
+      || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.classList.toggle('dark', dark);
+    document.documentElement.dataset.theme = mode;
+  }
+
+  /** Sets and persists the theme ('system' | 'light' | 'dark'). */
+  setTheme(mode: ThemeMode): void {
+    this.set({ theme: mode });
+    try {
+      localStorage.setItem('zim.theme', mode);
+    } catch {
+      // private mode: in-memory only
+    }
+    this.applyTheme();
+  }
+
+  /** Cycles system -> light -> dark -> system. */
+  cycleTheme(): void {
+    const order: ThemeMode[] = ['system', 'light', 'dark'];
+    const next = order[(order.indexOf(this.state.theme) + 1) % order.length];
+    this.setTheme(next);
+    this.notify(next === 'system' ? '跟随系统外观' : next === 'dark' ? '深色模式' : '浅色模式');
+  }
 
   // ------------------------------------------------------------ plumbing --
 
@@ -614,6 +661,12 @@ class ImStore {
     this.set({ activeCid: cid, tab: this.state.tab === 'friends' || this.state.tab === 'groups' ? 'conversations' : this.state.tab });
     const conversation = this.conversation(cid);
     if (!conversation) return;
+
+    // Remember where the unread block starts before markRead clears it.
+    const anchor = Number(conversation.read_seq ?? 0);
+    if (anchor > 0) {
+      this.set({ unreadAnchors: { ...this.state.unreadAnchors, [cid]: anchor } });
+    }
 
     const existing = this.state.threads[cid];
     if (existing && existing.items.length > 0) return;

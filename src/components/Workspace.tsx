@@ -85,6 +85,16 @@ function Rail() {
         <span title={CONNECTION_LABEL[state.connection] ?? state.connection} className={`h-2.5 w-2.5 rounded-full ${dot}`} />
         <button
           type="button"
+          aria-label="切换主题"
+          data-theme-mode={state.theme}
+          title={state.theme === 'dark' ? '深色模式' : state.theme === 'light' ? '浅色模式' : '跟随系统'}
+          onClick={() => imStore.cycleTheme()}
+          className="grid h-9 w-9 place-items-center rounded-xl border border-slate-200 text-sm text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+        >
+          {state.theme === 'dark' ? '🌙' : state.theme === 'light' ? '☀️' : '🖥️'}
+        </button>
+        <button
+          type="button"
           aria-label="桌面通知"
           aria-pressed={state.notifications}
           data-notifications={state.notifications ? 'on' : 'off'}

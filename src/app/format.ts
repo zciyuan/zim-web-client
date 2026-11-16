@@ -187,3 +187,23 @@ export const formatDuration = (ms: number): string => {
   const seconds = total % 60;
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
 };
+
+/** Day separator label ("今天"/"昨天"/date) when two messages fall on different days. */
+export const daySeparator = (previous?: number, current?: number): string => {
+  if (!current) return '';
+  const at = new Date(Number(current));
+  const day = (value: Date) => new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
+  const today = day(new Date());
+  const target = day(at);
+  if (previous) {
+    const before = day(new Date(Number(previous)));
+    if (before === target) return '';
+  }
+  const oneDay = 24 * 60 * 60 * 1000;
+  if (target === today) return '今天';
+  if (target === today - oneDay) return '昨天';
+  const sameYear = at.getFullYear() === new Date().getFullYear();
+  return sameYear
+    ? `${at.getMonth() + 1}月${at.getDate()}日`
+    : `${at.getFullYear()}年${at.getMonth() + 1}月${at.getDate()}日`;
+};
