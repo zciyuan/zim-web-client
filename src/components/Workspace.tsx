@@ -5,7 +5,7 @@ import { ChatPanel } from './ChatPanel';
 import { AddFriendDialog } from './AddFriendDialog';
 import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
-import { formatClock, formatListTime, messagePreview, previewConversation } from '../app/format';
+import { atOf, formatClock, formatListTime, mentionsInBrief, mentionsInUnread, messagePreview, previewConversation } from '../app/format';
 
 const TABS: { key: Tab; icon: string; label: string }[] = [
   { key: 'conversations', icon: '💬', label: '会话' },
@@ -167,8 +167,17 @@ function Sidebar() {
     if (searchOpen) searchInput.current?.focus();
   }, [searchOpen]);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const selfUid = String(state.me?.uid ?? '');
   const unreadTotal = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
   // Unread page groups by chat kind so long lists stay scannable.
+  // A row shows "[有人@我]" when the last message or an unread one mentions me.
+  const rowMentionsMe = (conversation: typeof state.conversations[number]): boolean => {
+    if (mentionsInBrief(conversation.last_msg_brief ?? '', selfUid)) return true;
+    const thread = state.threads[conversation.conversation_id];
+    if (!thread) return false;
+    return mentionsInUnread(thread.items, Number(conversation.read_seq ?? 0), selfUid);
+  };
+
   const unreadGroups = [
     {
       key: 'single',
@@ -185,6 +194,52 @@ function Sidebar() {
         .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0)),
     },
   ].filter((group) => group.rows.length > 0);
+
+  // Unread filter: all senders, only @me, or one sender.
+  const [unreadFilter, setUnreadFilter] = useState('all');
+  const unreadSenders = (() => {
+    const map = new Map<string, { uid: string; name: string; count: number }>();
+    for (const conversation of state.conversations) {
+      if (Number(conversation.unread ?? 0) === 0) continue;
+      const thread = state.threads[conversation.conversation_id];
+      if (!thread) continue;
+      const readSeq = Number(conversation.read_seq ?? 0);
+      for (const item of thread.items) {
+        if (Number(item.seq) <= readSeq) continue;
+        const uid = String(item.send_id);
+        if (!uid || uid === selfUid) continue;
+        const entry = map.get(uid) ?? { uid, name: imStore.senderName(uid), count: 0 };
+        entry.count += 1;
+        map.set(uid, entry);
+      }
+    }
+    return [...map.values()].sort((a, b) => b.count - a.count);
+  })();
+
+  const unreadItemsOf = (conversation: typeof state.conversations[number]) => {
+    const thread = state.threads[conversation.conversation_id];
+    if (!thread) return [];
+    const readSeq = Number(conversation.read_seq ?? 0);
+    return thread.items.filter((item) => Number(item.seq) > readSeq && String(item.send_id) !== selfUid);
+  };
+
+  const matchesUnreadFilter = (conversation: typeof state.conversations[number]): boolean => {
+    if (unreadFilter === 'all') return true;
+    const items = unreadItemsOf(conversation);
+    if (unreadFilter === 'at') {
+      return items.some((item) => {
+        const at = item.at_user_ids?.length ? item.at_user_ids.map(String) : atOf(item.content);
+        return at.includes(selfUid) || at.includes('all');
+      });
+    }
+    const uid = unreadFilter.startsWith('uid:') ? unreadFilter.slice(4) : '';
+    return Boolean(uid) && items.some((item) => String(item.send_id) === uid);
+  };
+
+  const visibleUnreadGroups = unreadGroups
+    .map((group) => ({ ...group, rows: group.rows.filter(matchesUnreadFilter) }))
+    .filter((group) => group.rows.length > 0);
+
   const title =
     state.tab === 'unread' ? `未读（${unreadTotal}）`
       : state.tab === 'friends' ? `好友（${state.friends.length}）`
@@ -327,9 +382,24 @@ function Sidebar() {
               <EmptyList text="没有未读消息" />
             ) : (
               <>
+                <select
+                  aria-label="按发送者筛选未读"
+                  data-unread-sender-filter
+                  value={unreadFilter}
+                  onChange={(event) => setUnreadFilter(event.target.value)}
+                  className="mb-1 w-full rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                >
+                  <option value="all">全部发送者</option>
+                  <option value="at">仅 @我</option>
+                  {unreadSenders.map((sender) => (
+                    <option key={sender.uid} value={`uid:${sender.uid}`}>
+                      {sender.name}（{sender.count}）
+                    </option>
+                  ))}
+                </select>
                 <div className="mb-2 flex items-center justify-between px-1">
                   <span className="text-[11px] text-slate-400">
-                    {unreadGroups.reduce((sum, group) => sum + group.rows.length, 0)} 个会话有未读
+                    {visibleUnreadGroups.reduce((sum, group) => sum + group.rows.length, 0)} 个会话有未读
                   </span>
                   <button
                     type="button"
@@ -344,7 +414,7 @@ function Sidebar() {
                     全部已读
                   </button>
                 </div>
-                {unreadGroups.map((group) => {
+                {visibleUnreadGroups.map((group) => {
                   const collapsed = Boolean(collapsedGroups[group.key]);
                   return (
                     <div key={group.key} className="mb-1" data-unread-group={group.key}>
@@ -378,7 +448,14 @@ function Sidebar() {
                                 <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
                                 <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
                               </span>
-                              <span className="mt-0.5 block truncate text-xs text-slate-500">{previewConversation(conversation)}</span>
+                              <span className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
+                                {mentionsInBrief(conversation.last_msg_brief ?? '', selfUid) ? (
+                                  <span className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950 dark:text-rose-300">
+                                    [有人@我]
+                                  </span>
+                                ) : null}
+                                <span className="truncate">{previewConversation(conversation)}</span>
+                              </span>
                             </span>
                             <span className="shrink-0 rounded-full bg-rose-500 px-1.5 text-[11px] leading-[18px] text-white">
                               {unread > 99 ? '99+' : unread}
@@ -441,8 +518,16 @@ function Sidebar() {
                           {formatListTime(conversation.last_msg_at)}
                         </span>
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-slate-500">
-                        {previewConversation(conversation)}
+                      <span className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
+                        {rowMentionsMe(conversation) ? (
+                          <span
+                            data-row-at-me={conversation.conversation_id}
+                            className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950 dark:text-rose-300"
+                          >
+                            [有人@我]
+                          </span>
+                        ) : null}
+                        <span className="truncate">{previewConversation(conversation)}</span>
                       </span>
                     </span>
                     {unread > 0 ? (
