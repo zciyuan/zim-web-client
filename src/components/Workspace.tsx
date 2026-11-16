@@ -928,25 +928,13 @@ export function Workspace() {
 
   return (
     <div className="flex h-full flex-col bg-slate-100 dark:bg-slate-950">
-      {state.secondaryTab ? (
-        <div data-connection-banner="secondary" className="flex items-center justify-center gap-2 bg-amber-400 px-3 py-1 text-xs text-amber-950">
-          <span>已在另一个窗口登录，本窗口未连接（避免两边互相掉线）</span>
-          <button
-            type="button"
-            data-take-over-tab
-            onClick={() => void imStore.takeOverTab()}
-            className="rounded border border-amber-900/40 px-2 py-0.5 text-[11px] hover:bg-amber-900/10"
-          >
-            在此窗口继续
-          </button>
-        </div>
-      ) : state.kickedLoop ? (
+      {state.kickedLoop ? (
         <div data-connection-banner="kicked" className="flex items-center justify-center gap-2 bg-rose-500 px-3 py-1 text-xs text-white">
-          <span>登录状态在别处被接管，已暂停自动重连</span>
+          <span>账号在别处登录，已停止重连</span>
           <button
             type="button"
             data-retry-connection
-            onClick={() => void imStore.takeOverTab()}
+            onClick={() => void imStore.retryConnection()}
             className="rounded border border-white/60 px-2 py-0.5 text-[11px] hover:bg-white/10"
           >
             重新连接

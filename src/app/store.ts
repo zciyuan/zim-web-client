@@ -12,7 +12,6 @@ import { messagePreview, messageText } from './format';
 import { captureVideoPoster, compressImage, measureImage, measureMedia } from './image';
 import { randomId } from './id';
 import { detectRtcSupport, explainRtcError } from './rtc-support';
-import { claimTabLeadership, onTabTakeover, releaseTabLeadership, requestTabTakeover, startLeaseRenewal } from './tab-lock';
 import {
   OP,
   decodeMessageItem,
@@ -172,8 +171,6 @@ export interface ImState {
   drafts: Record<string, string>;
   /** group announcements keyed by exact group id (banner source) */
   groupNotices: Record<string, string>;
-  /** another tab owns the socket; this tab is read-only until takeover */
-  secondaryTab: boolean;
   /** repeated abnormal closes: the account is live elsewhere, stop retrying */
   kickedLoop: boolean;
   /** direct chats: how far the peer has read (seq, from 1906) */
@@ -221,7 +218,6 @@ const initialState: ImState = {
   searchHistory: [],
   drafts: {},
   groupNotices: {},
-  secondaryTab: false,
   kickedLoop: false,
   quoteTarget: null,
   call: emptyCall(),
@@ -345,10 +341,6 @@ class ImStore {
   private restorePromise: Promise<void> | null = null;
   /** Timestamps of recent abnormal closes (kick-loop detection). */
   private closeStamps: number[] = [];
-  /** Stops the lease renewal timer for the current socket. */
-  private leaseTimer: (() => void) | null = null;
-  /** Unsubscribes the cross-tab takeover listener. */
-  private takeoverOff: (() => void) | null = null;
   /** Pushes that arrived while a thread page was still loading, keyed by cid. */
   private pendingPushes = new Map<string, UiMessage[]>();
   /** Files kept for failed uploads so they can be retried. */
@@ -500,23 +492,16 @@ class ImStore {
     this.notify('登录状态在别处被接管，已暂停自动重连', 'error');
   }
 
-  /** Takes the socket over from another tab (or resumes after a kick loop). */
-  async takeOverTab(): Promise<void> {
-    requestTabTakeover();
-    releaseTabLeadership();
-    claimTabLeadership(true);
-    this.client?.close();
-    this.client = null;
-    this.restorePromise = null;
-    this.closeStamps = [];
-    this.set({ secondaryTab: false, kickedLoop: false, connection: 'idle' });
-    await this.restore();
-  }
 
   /** Manual retry after a dropped connection: reopen the socket and refresh. */
   async retryConnection(): Promise<void> {
-    if (this.state.kickedLoop || this.state.secondaryTab) {
-      await this.takeOverTab();
+    if (this.state.kickedLoop) {
+      this.set({ kickedLoop: false, connection: 'idle' });
+      this.client?.close();
+      this.client = null;
+      this.restorePromise = null;
+      this.closeStamps = [];
+      await this.restore();
       return;
     }
     if (this.state.connection === 'open' || this.state.connection === 'connecting' || this.state.connection === 'reconnecting') {
@@ -586,15 +571,6 @@ class ImStore {
    * promise makes the call idempotent. */
   restore(): Promise<void> {
     this.restorePromise ??= this.restoreSession();
-    // Another tab may take the socket over at any time: drop ours quietly.
-    this.takeoverOff?.();
-    this.takeoverOff = onTabTakeover(() => {
-      this.client?.close();
-      this.client = null;
-      this.leaseTimer?.();
-      this.leaseTimer = null;
-      this.set({ secondaryTab: true, connection: 'closed' });
-    });
     return this.restorePromise;
   }
 
@@ -632,36 +608,9 @@ class ImStore {
   }
 
   private async enterWorkspace(token: string, endpoint: string, username: string): Promise<void> {
-    // One live socket per account: the gate closes the previous connection on a
-    // new bind, so a second tab would kick this one forever.
-    this.leaseTimer?.();
-    if (!claimTabLeadership()) {
-      this.client?.close();
-      this.client = null;
-      this.leaseTimer = null;
-      this.set({ secondaryTab: true, connection: 'closed' });
-      // Still usable read-only: REST bootstrap without a socket.
-      this.rest.setTokens({ accessToken: token });
-      this.persistSession(endpoint, username);
-      try {
-        const profile = await this.rest.me();
-        this.set({
-          status: 'ready',
-          me: {
-            uid: profile.uid,
-            name: profile.nickname || username || profile.uid,
-            avatar: profile.avatar ?? '',
-          },
-        });
-        await this.bootstrap();
-      } catch {
-        // A read-only tab may fail to bootstrap; the banner still explains why.
-        this.set({ status: 'ready' });
-      }
-      return;
-    }
-    this.leaseTimer = startLeaseRenewal();
-    this.set({ secondaryTab: false, kickedLoop: false });
+    // Same-platform logins are single-session: the newest connection wins and the
+    // server pushes 1902 to the old one, which then logs out (see handleKick).
+    this.set({ kickedLoop: false });
     // One live socket per client: a re-login must not leave the previous one
     // reconnecting in the background (it would kick the new connection).
     this.client?.close();
@@ -718,9 +667,12 @@ class ImStore {
     );
   }
 
-  logout(): void {
+  logout(kicked = false): void {
     this.stopPolling();
-    void this.client?.request(OP.LOGOUT, new Uint8Array(0), decodeOperationRes).catch(() => undefined);
+    // A kicked connection is already gone: skip the logout round-trip.
+    if (!kicked) {
+      void this.client?.request(OP.LOGOUT, new Uint8Array(0), decodeOperationRes).catch(() => undefined);
+    }
     this.client?.close();
     this.client = null;
     this.rest.clearTokens();
@@ -2860,13 +2812,17 @@ class ImStore {
 
   private handleKick(reason: number): void {
     const reasons: Record<number, string> = {
-      1: '账号在另一台设备登录',
+      1: '账号已在另一处登录，本端已退出',
       2: '管理员强制下线',
-      3: '登录态已失效',
+      3: '登录态已失效，请重新登录',
       4: '账号已被禁用',
     };
-    this.notify(reasons[reason] ?? '已被强制下线', 'error');
-    this.logout();
+    const message = reasons[reason] ?? '已被强制下线';
+    // Leave a persistent note on the login screen: the toast disappears with the
+    // workspace. logout() closes the socket so no reconnect fight follows.
+    this.notify(message, 'error');
+    this.logout(true);
+    this.set({ authError: message });
   }
 
   /** Re-marks the open conversation when the tab becomes visible again. */

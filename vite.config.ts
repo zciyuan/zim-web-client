@@ -19,8 +19,11 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react(), tailwindcss()],
     server: {
-      // Bind all interfaces so phones/other machines on the LAN can open the app.
-      host: env.ZIM_HOST ?? '0.0.0.0',
+      // Bind every interface (IPv4 + IPv6) so phones/other machines on the LAN
+      // can open the app. Override with ZIM_HOST (e.g. 127.0.0.1 for local only).
+      host: env.ZIM_HOST ?? true,
+      // A dev server on the LAN is addressed by IP/hostname: skip the Host check.
+      allowedHosts: env.ZIM_ALLOWED_HOSTS ? env.ZIM_ALLOWED_HOSTS.split(',') : true,
       // 5173/5180 fall inside a Windows excluded port range (5145-5244) on this
       // host, so the dev server uses 5280. Override with `vite --port`.
       port: 5280,

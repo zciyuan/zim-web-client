@@ -1723,6 +1723,36 @@ const main = async () => {
   const messageCount = await alice.evaluate(() => Object.values(window.__zim.getSnapshot().threads)
     .reduce((total, thread) => total + thread.items.length, 0));
   assert.ok(messageCount > 0, 'alice should have rendered message bubbles in some thread');
+  step('a second login kicks the first one out');
+  // Same account, same platform: the newest socket wins, the old one gets a
+  // 1902 push and must land back on the login screen with the reason.
+  const rival = await browser.newPage();
+  rival.on('pageerror', (err) => errors.push(`rival pageerror: ${err.message}`));
+  await rival.goto(BASE, { waitUntil: 'networkidle2' });
+  await rival.waitForSelector('form');
+  await rival.evaluate(() => {
+    const set = (selector, value) => {
+      const el = document.querySelector(selector);
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    set('input[autocomplete="username"]', 'alice');
+    set('input[autocomplete="current-password"]', 'password');
+    document.querySelector('button[type="submit"]').click();
+  });
+  await rival.waitForSelector('[aria-label="主导航"]', { timeout: 25_000 });
+  await rival.waitForFunction(() => window.__zim.getSnapshot().connection === 'open', { timeout: 25_000 });
+  await alice.bringToFront();
+  await alice.waitForFunction(
+    () => document.querySelector('[aria-label="主导航"]') === null
+      && (document.querySelector('[role="alert"]')?.textContent ?? '').includes('另一处登录'),
+    { timeout: 20_000 },
+  );
+  const kickText = await alice.evaluate(() => document.querySelector('[role="alert"]')?.textContent ?? '');
+  assert.ok(kickText.includes('另一处登录'), `kick notice = ${kickText}`);
+  await alice.screenshot({ path: path.join(OUT, '40-kicked.png') });
+  await rival.close();
+
   assert.deepEqual(errors, [], `browser errors: ${errors.join(' | ')}`);
 
   await browser.close();
