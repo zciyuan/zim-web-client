@@ -21,3 +21,6 @@ src-tauri/target/
 src-tauri/gen/
 android/
 ios/
+
+# Local TLS certificate for LAN/HTTPS dev
+certs/

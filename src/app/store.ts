@@ -10,7 +10,9 @@ import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
 import { captureVideoPoster, compressImage, measureImage, measureMedia } from './image';
+import { randomId } from './id';
 import { detectRtcSupport, explainRtcError } from './rtc-support';
+import { claimTabLeadership, onTabTakeover, releaseTabLeadership, requestTabTakeover, startLeaseRenewal } from './tab-lock';
 import {
   OP,
   decodeMessageItem,
@@ -103,6 +105,16 @@ const SESSION_KEY = 'zim.session';
 const SYNC_KEY = 'zim.sync';
 const DEVICE_KEY = 'zim.device';
 const ENDPOINT_KEY = 'zim.endpoint';
+
+// A loopback endpoint saved on this machine is useless from another device:
+// fall back to same-origin (the dev server proxies /v1 and /ws).
+const savedEndpoint = (): string => {
+  const saved = localStorage.getItem(ENDPOINT_KEY) ?? '';
+  if (!saved) return '';
+  const loopbackUrl = /(^|\/\/)(127\.0\.0\.1|localhost)(:|\/|$)/i.test(saved);
+  const pageLoopback = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(window.location.hostname);
+  return loopbackUrl && !pageLoopback ? '' : saved;
+};
 const SDK_VERSION = 'web-2.0.0';
 
 export type Tab = 'conversations' | 'unread' | 'friends' | 'groups';
@@ -160,6 +172,10 @@ export interface ImState {
   drafts: Record<string, string>;
   /** group announcements keyed by exact group id (banner source) */
   groupNotices: Record<string, string>;
+  /** another tab owns the socket; this tab is read-only until takeover */
+  secondaryTab: boolean;
+  /** repeated abnormal closes: the account is live elsewhere, stop retrying */
+  kickedLoop: boolean;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -205,11 +221,13 @@ const initialState: ImState = {
   searchHistory: [],
   drafts: {},
   groupNotices: {},
+  secondaryTab: false,
+  kickedLoop: false,
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
   me: null,
-  endpoint: localStorage.getItem(ENDPOINT_KEY) ?? '',
+  endpoint: savedEndpoint(),
   tab: 'conversations',
   conversations: [],
   friends: [],
@@ -325,6 +343,12 @@ class ImStore {
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
+  /** Timestamps of recent abnormal closes (kick-loop detection). */
+  private closeStamps: number[] = [];
+  /** Stops the lease renewal timer for the current socket. */
+  private leaseTimer: (() => void) | null = null;
+  /** Unsubscribes the cross-tab takeover listener. */
+  private takeoverOff: (() => void) | null = null;
   /** Pushes that arrived while a thread page was still loading, keyed by cid. */
   private pendingPushes = new Map<string, UiMessage[]>();
   /** Files kept for failed uploads so they can be retried. */
@@ -468,8 +492,33 @@ class ImStore {
     return detectRtcSupport();
   }
 
+  /** Stops reconnecting after repeated abnormal closes (account live elsewhere). */
+  private stopKickLoop(): void {
+    this.closeStamps = [];
+    this.client?.close();
+    this.set({ kickedLoop: true, connection: 'closed' });
+    this.notify('登录状态在别处被接管，已暂停自动重连', 'error');
+  }
+
+  /** Takes the socket over from another tab (or resumes after a kick loop). */
+  async takeOverTab(): Promise<void> {
+    requestTabTakeover();
+    releaseTabLeadership();
+    claimTabLeadership(true);
+    this.client?.close();
+    this.client = null;
+    this.restorePromise = null;
+    this.closeStamps = [];
+    this.set({ secondaryTab: false, kickedLoop: false, connection: 'idle' });
+    await this.restore();
+  }
+
   /** Manual retry after a dropped connection: reopen the socket and refresh. */
   async retryConnection(): Promise<void> {
+    if (this.state.kickedLoop || this.state.secondaryTab) {
+      await this.takeOverTab();
+      return;
+    }
     if (this.state.connection === 'open' || this.state.connection === 'connecting' || this.state.connection === 'reconnecting') {
       await this.refresh();
       return;
@@ -537,6 +586,15 @@ class ImStore {
    * promise makes the call idempotent. */
   restore(): Promise<void> {
     this.restorePromise ??= this.restoreSession();
+    // Another tab may take the socket over at any time: drop ours quietly.
+    this.takeoverOff?.();
+    this.takeoverOff = onTabTakeover(() => {
+      this.client?.close();
+      this.client = null;
+      this.leaseTimer?.();
+      this.leaseTimer = null;
+      this.set({ secondaryTab: true, connection: 'closed' });
+    });
     return this.restorePromise;
   }
 
@@ -574,6 +632,36 @@ class ImStore {
   }
 
   private async enterWorkspace(token: string, endpoint: string, username: string): Promise<void> {
+    // One live socket per account: the gate closes the previous connection on a
+    // new bind, so a second tab would kick this one forever.
+    this.leaseTimer?.();
+    if (!claimTabLeadership()) {
+      this.client?.close();
+      this.client = null;
+      this.leaseTimer = null;
+      this.set({ secondaryTab: true, connection: 'closed' });
+      // Still usable read-only: REST bootstrap without a socket.
+      this.rest.setTokens({ accessToken: token });
+      this.persistSession(endpoint, username);
+      try {
+        const profile = await this.rest.me();
+        this.set({
+          status: 'ready',
+          me: {
+            uid: profile.uid,
+            name: profile.nickname || username || profile.uid,
+            avatar: profile.avatar ?? '',
+          },
+        });
+        await this.bootstrap();
+      } catch {
+        // A read-only tab may fail to bootstrap; the banner still explains why.
+        this.set({ status: 'ready' });
+      }
+      return;
+    }
+    this.leaseTimer = startLeaseRenewal();
+    this.set({ secondaryTab: false, kickedLoop: false });
     // One live socket per client: a re-login must not leave the previous one
     // reconnecting in the background (it would kick the new connection).
     this.client?.close();
@@ -586,6 +674,15 @@ class ImStore {
         if (import.meta.env.DEV) console.debug(`[zim] conn ${connection} ${detail?.code ?? ''} ${detail?.reason ?? ''}`);
         this.set({ connection: connection === 'reconnected' ? 'open' : connection });
         if (connection === 'offline') this.notify('连接已断开，自动重连已放弃，请刷新页面', 'error');
+        // Repeated abnormal closes mean another client owns the account: stop
+        // the reconnect fight instead of showing "正在重连中" forever.
+        if (connection === 'closed' && (detail?.code === 1006 || detail?.code === undefined)) {
+          const now = Date.now();
+          this.closeStamps = this.closeStamps.filter((stamp) => now - stamp < 25_000);
+          this.closeStamps.push(now);
+          if (this.closeStamps.length >= 4) this.stopKickLoop();
+        }
+        if (connection === 'open' || connection === 'reconnected') this.closeStamps = [];
         // A reconnect may have missed pushes: converge with 1601/1514.
         if (connection === 'reconnected') void this.runSync();
       },
@@ -1730,7 +1827,7 @@ class ImStore {
     if (!conversation || !this.client) return null;
     const draft: UiMessage = {
       server_msg_id: '',
-      client_msg_id: crypto.randomUUID(),
+      client_msg_id: randomId(),
       conversation_id: conversation.conversation_id,
       seq: '0',
       send_id: this.state.me?.uid ?? '',
@@ -1858,7 +1955,7 @@ class ImStore {
     const target = this.state.quoteTarget;
     const conversation = this.conversation(this.state.activeCid);
     if (!target || !target.server_msg_id || !conversation || !this.client) return;
-    const clientMsgId = crypto.randomUUID();
+    const clientMsgId = randomId();
     const preview = messageText(target.content, target.msg_type).text.slice(0, 120);
     // Quote replies mention the original author so they get the "@me" badge.
     const selfUid = String(this.state.me?.uid ?? '');
@@ -1942,7 +2039,7 @@ class ImStore {
         await this.client.request(
           OP.MERGE,
           encodeMergeReq({
-            clientMsgId: crypto.randomUUID(),
+            clientMsgId: randomId(),
             recvId: target.recvId,
             groupId: target.groupId,
             serverMsgIds,
@@ -1976,13 +2073,13 @@ class ImStore {
       try {
         const payload = target.groupId
           ? encodeSendGroupReq({
-            clientMsgId: crypto.randomUUID(),
+            clientMsgId: randomId(),
             groupId: target.groupId,
             msgType: message.msg_type,
             content: message.content,
           })
           : encodeSendSingleReq({
-            clientMsgId: crypto.randomUUID(),
+            clientMsgId: randomId(),
             recvId: target.recvId as string,
             msgType: message.msg_type,
             content: message.content,
@@ -2562,7 +2659,7 @@ class ImStore {
       this.notify(`无法呼叫：${support.detail}`, 'error');
       return;
     }
-    const callId = crypto.randomUUID();
+    const callId = randomId();
     const isGroup = conversation.type === 2;
     const targetType: 1 | 2 = isGroup ? 2 : 1;
     // Derive the target from the conversation id: REST group ids are JSON
