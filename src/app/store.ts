@@ -17,6 +17,9 @@ import {
   decodeMergeRes,
   decodeQuoteRes,
   decodeReadSyncPush,
+  decodeFriendEventPush,
+  decodeTypingPush,
+  encodeTypingReq,
   decodeSearchMessageRes,
   decodeOperationRes,
   decodeReadReceiptRes,
@@ -132,6 +135,8 @@ export interface ImState {
   status: AppStatus;
   authError: string;
   connection: ConnectionState;
+  /** conversation id -> who is typing and until when (ms) */
+  typing: Record<string, { uid: string; until: number }>;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -166,6 +171,7 @@ const initialState: ImState = {
   status: 'idle',
   authError: '',
   connection: 'idle',
+  typing: {},
   peerReads: {},
   quoteTarget: null,
   call: emptyCall(),
@@ -279,6 +285,7 @@ class ImStore {
   private client: IMClient | null = null;
   private seenPushes = new Set<string>();
   private pollTimer: number | null = null;
+  private lastTypingSentAt = 0;
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
@@ -1290,6 +1297,18 @@ class ImStore {
     this.set({ quoteTarget: message });
   }
 
+  /** 1517: tells the other side that this user is typing (throttled to 3s). */
+  notifyTyping(): void {
+    const cid = this.state.activeCid;
+    if (!cid || !this.client || this.state.connection !== 'open') return;
+    const now = Date.now();
+    if (this.lastTypingSentAt && now - this.lastTypingSentAt < 3000) return;
+    this.lastTypingSentAt = now;
+    void this.client
+      .request(OP.TYPING, encodeTypingReq({ conversationId: cid, typing: true }), decodeOperationRes)
+      .catch(() => undefined);
+  }
+
   /** 1504: sends a reply that quotes the target message. */
   async sendQuote(text: string): Promise<void> {
     const target = this.state.quoteTarget;
@@ -1698,6 +1717,35 @@ class ImStore {
     if (import.meta.env.DEV && event.opcode !== OP.PUSH_MSG) console.debug(`[zim] push opcode=${event.opcode} len=${event.payload.length}`);
     if (event.opcode === OP.CALL_ANSWER) {
       this.handleCallPush(event.payload);
+      return;
+    }
+    if (event.opcode === OP.PUSH_FRIEND) {
+      const update = decodeFriendEventPush(event.payload);
+      if (update.kind === 1 && String(update.to_uid) === String(this.state.me?.uid ?? '')) {
+        this.notify('收到新的好友申请');
+      }
+      void this.refreshRelations();
+      return;
+    }
+    if (event.opcode === OP.PUSH_TYPING) {
+      const update = decodeTypingPush(event.payload);
+      if (update.conversation_id) {
+        const next = { ...this.state.typing };
+        if (update.typing) {
+          next[update.conversation_id] = { uid: update.uid, until: Date.now() + 4000 };
+          window.setTimeout(() => {
+            const current = this.state.typing[update.conversation_id];
+            if (current && current.until <= Date.now()) {
+              const cleared = { ...this.state.typing };
+              delete cleared[update.conversation_id];
+              this.set({ typing: cleared });
+            }
+          }, 4200);
+        } else {
+          delete next[update.conversation_id];
+        }
+        this.set({ typing: next });
+      }
       return;
     }
     if (event.opcode === OP.PUSH_READ_SYNC) {

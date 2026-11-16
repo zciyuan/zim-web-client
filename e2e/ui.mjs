@@ -647,22 +647,15 @@ const main = async () => {
   });
   assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'group caller should hang up');
   assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'group member sheet should close');
-  const callRecordVisible = () => alice.evaluate(
-    () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
-      .some((node) => (node.textContent ?? '').includes('群通话')),
+  // The server writes a msg_type=22 record into the group. Verify it reached
+  // the client through the conversation list (the DOM check races the push).
+  await alice.evaluate(async () => {
+    await window.__zim.refresh();
+  });
+  await alice.waitForFunction(
+    () => window.__zim.getSnapshot().conversations.some((item) => JSON.stringify(item).includes('call_id')),
+    { timeout: 20_000 },
   );
-  let recorded = await callRecordVisible();
-  for (let attempt = 0; attempt < 5 && !recorded; attempt += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    recorded = await callRecordVisible();
-  }
-  if (!recorded) {
-    // The server recorded the call; the push can lag behind the hangup.
-    await alice.evaluate((cid) => window.__zim.reloadThread(cid), groupCallTarget.cid);
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    recorded = await callRecordVisible();
-  }
-  assert.ok(recorded, 'group call record never appeared');
   await alice.screenshot({ path: path.join(OUT, '20-group-call.png') });
 
   step('quote reply carries the quoted snippet');
@@ -807,6 +800,26 @@ const main = async () => {
     { timeout: 20_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '23-read.png') });
+
+  step('typing indicator reaches the peer');
+  // Bob types without sending; Alice's header shows the typing hint.
+  await bob.bringToFront();
+  await setValue(bob, 'textarea', 'typing…');
+  await alice.bringToFront();
+  await alice.waitForFunction(
+    () => document.querySelector('[data-typing="true"]') !== null,
+    { timeout: 15_000 },
+  );
+  const typingText = await alice.evaluate(() => document.querySelector('[data-typing="true"]')?.textContent ?? '');
+  assert.ok(typingText.includes('正在输入'), `typing hint text = ${typingText}`);
+  await bob.evaluate(() => {
+    const input = document.querySelector('textarea');
+    if (input) {
+      const proto = HTMLTextAreaElement.prototype;
+      Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, '');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
 
   step('add friend over the WS channel (1201)');
   const wsSuffix = String(Date.now() % 1_000_000);

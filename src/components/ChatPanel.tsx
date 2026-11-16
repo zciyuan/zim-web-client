@@ -386,6 +386,7 @@ function Composer({ disabled }: { disabled: boolean }) {
         placeholder="输入消息，Enter 发送，Shift+Enter 换行，可直接粘贴图片"
         onChange={(event) => {
           setValue(event.target.value);
+          if (event.target.value.trim() !== '') imStore.notifyTyping();
           const el = event.currentTarget;
           el.style.height = 'auto';
           el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
@@ -465,9 +466,12 @@ export function ChatPanel() {
   }
 
   const title = imStore.conversationTitle(conversation);
-  const subtitle = isGroup
-    ? `群 ${conversation.group_id} · 会话 ${conversation.conversation_id}`
-    : `用户 ${conversation.peer_id} · 会话 ${conversation.conversation_id}`;
+  const typingUntil = state.typing[conversation?.conversation_id ?? '']?.until ?? 0;
+  const subtitle = typingUntil > Date.now()
+    ? (isGroup ? '有人正在输入…' : '对方正在输入…')
+    : isGroup
+      ? `群 ${conversation.group_id} · 会话 ${conversation.conversation_id}`
+      : `用户 ${conversation.peer_id} · 会话 ${conversation.conversation_id}`;
 
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-slate-100 dark:bg-slate-950" aria-label="聊天">
@@ -482,7 +486,9 @@ export function ChatPanel() {
           </button>
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h2>
-            <p className="truncate text-[11px] text-slate-500">{subtitle}</p>
+            <p className="truncate text-[11px] text-slate-500" data-typing={typingUntil > Date.now() ? 'true' : 'false'}>
+              {subtitle}
+            </p>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">

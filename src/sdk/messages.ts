@@ -28,6 +28,9 @@ export const OP = {
   QUOTE: 1504,
   READ_RECEIPT: 1505,
   RECALL: 1506,
+  TYPING: 1517,
+  PUSH_TYPING: 1908,
+  PUSH_FRIEND: 1909,
   ADD_REACTION: 1515,
   REMOVE_REACTION: 1516,
   EDIT: 1507,
@@ -456,4 +459,38 @@ export const decodeReadSyncPush = (bytes: Uint8Array): {
     else reader.skip(wire);
   });
   return { conversation_id: conversationId, uid, read_seq: readSeq };
+};
+/** 1517 TypingReq { conversation_id=1; typing=2; } -> OperationRes */
+export const encodeTypingReq = (req: { conversationId: string; typing: boolean }): Uint8Array =>
+  new Writer().string(1, req.conversationId).bool(2, req.typing).finish();
+
+/** 1908 TypingPush { conversation_id=1; uid=2; typing=3; } */
+export const decodeTypingPush = (bytes: Uint8Array): {
+  conversation_id: string;
+  uid: string;
+  typing: boolean;
+} => {
+  let conversationId = '';
+  let uid = '0';
+  let typing = false;
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) conversationId = reader.string();
+    else if (field === 2) uid = reader.int64();
+    else if (field === 3) typing = reader.bool();
+    else reader.skip(wire);
+  });
+  return { conversation_id: conversationId, uid, typing };
+};
+/** 1909 FriendEventPush { kind=1; from_uid=2; to_uid=3; } */
+export const decodeFriendEventPush = (bytes: Uint8Array): { kind: number; from_uid: string; to_uid: string } => {
+  let kind = 0;
+  let fromUid = '0';
+  let toUid = '0';
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) kind = reader.int32();
+    else if (field === 2) fromUid = reader.int64();
+    else if (field === 3) toUid = reader.int64();
+    else reader.skip(wire);
+  });
+  return { kind, from_uid: fromUid, to_uid: toUid };
 };
