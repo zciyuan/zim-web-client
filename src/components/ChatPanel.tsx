@@ -4,10 +4,23 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
-import { attachmentOf, formatBytes, formatDuration, mergeOf, quoteOf } from '../app/format';
+import { atOf, attachmentOf, formatBytes, formatDuration, mergeOf, quoteOf, uploadOf } from '../app/format';
 import { daySeparator, formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
+
+/** Renders "@name" tokens as highlighted mentions. */
+function MentionText({ text }: { text: string }) {
+  const parts = text.split(/(@[^\s@]+)/g);
+  return (
+    <>
+      {parts.map((part, index) => (part.startsWith('@') && part.length > 1
+        ? <span key={index} data-mention className="font-medium text-indigo-600 dark:text-indigo-400">{part}</span>
+        : <span key={index}>{part}</span>
+      ))}
+    </>
+  );
+}
 
 function Bubble({
   message,
@@ -42,6 +55,8 @@ function Bubble({
   const state = message.localState ?? 'sent';
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
+  const atUids = message.at_user_ids?.length ? message.at_user_ids.map(String) : atOf(message.content);
+  const atMe = !mine && atUids.includes(String(imStore.me?.uid ?? ''));
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
@@ -100,8 +115,28 @@ function Bubble({
         <div className={`mb-0.5 flex items-baseline gap-1.5 text-[11px] text-slate-400 ${mine ? 'justify-end' : ''}`}>
           {showSender && !mine ? <span>{senderName}</span> : null}
           <span>{formatClock(message.send_time)}</span>
+          {atMe ? (
+            <span data-at-me-badge className="rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950 dark:text-rose-300">
+              有人@我
+            </span>
+          ) : null}
         </div>
-        {image ? (
+        {typeof message.progress === 'number' ? (
+          <div
+            data-upload-progress={message.progress}
+            className={`w-56 rounded-2xl border px-3 py-2 ${
+              mine ? 'border-indigo-500 bg-indigo-600/10' : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
+              <span className="truncate">{uploadOf(message.content)?.name ?? '上传中'}</span>
+              <span>{message.progress}%</span>
+            </div>
+            <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-700">
+              <div className="h-full rounded-full bg-indigo-500 transition-all" style={{ width: `${message.progress}%` }} />
+            </div>
+          </div>
+        ) : image ? (
           <button
             type="button"
             data-image-bubble="true"
@@ -211,7 +246,9 @@ function Bubble({
                 </ol>
               </details>
             ) : (
-              message.status === 2 ? '该消息已删除' : text
+              message.status === 2
+                ? '该消息已删除'
+                : <MentionText text={text} />
             )}
           </div>
         )}
@@ -301,8 +338,65 @@ function Composer({ disabled }: { disabled: boolean }) {
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [recording, setRecording] = useState<{ recorder: MediaRecorder; chunks: Blob[]; startedAt: number } | null>(null);
   const [recordSeconds, setRecordSeconds] = useState(0);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentions, setMentions] = useState<{ uid: string; name: string }[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  const conversation = state.conversations.find((item) => item.conversation_id === state.activeCid);
+  const isGroupChat = conversation?.type === 2;
+  const [mentionMembers, setMentionMembers] = useState<{ uid: string; name: string }[]>([]);
+
+  // Load group members the first time the mention picker is needed.
+  useEffect(() => {
+    if (!mentionQuery || !isGroupChat || !conversation?.group_id) return;
+    if (mentionMembers.length > 0) return;
+    const gid = conversation.conversation_id.startsWith('g_')
+      ? conversation.conversation_id.slice(2)
+      : String(conversation.group_id);
+    void imStore.groupMembers(gid)
+      .then((members) => {
+        setMentionMembers(members.map((member) => ({
+          uid: String(member.user_id),
+          name: imStore.senderName(String(member.user_id)),
+        })));
+      })
+      .catch(() => setMentionMembers([]));
+  }, [mentionQuery, isGroupChat, conversation?.group_id, mentionMembers.length]);
+
+  // Prefer real group members; fall back to the friend list when the member
+  // RPC returns nothing (legacy groups may have no member rows to read).
+  const mentionPool = mentionMembers.length > 0
+    ? mentionMembers
+    : state.friends.map((friend) => ({
+      uid: String(friend.friend_id),
+      name: imStore.friendName(String(friend.friend_id)),
+    }));
+  const mentionCandidates = mentionQuery === null
+    ? []
+    : mentionPool
+      .filter((member) => {
+        const needle = mentionQuery.toLowerCase();
+        return !needle || member.name.toLowerCase().includes(needle) || member.uid.includes(needle);
+      })
+      .slice(0, 6);
+
+  const pickMention = (member: { uid: string; name: string }) => {
+    const el = inputRef.current;
+    const caret = el?.selectionStart ?? value.length;
+    const before = value.slice(0, caret).replace(/@[^@\s]*$/, '');
+    const after = value.slice(caret);
+    setValue(`${before}@${member.name} ${after}`);
+    setMentions((current) => (current.some((item) => item.uid === member.uid)
+      ? current
+      : [...current, member]));
+    setMentionQuery(null);
+    requestAnimationFrame(() => {
+      el?.focus();
+      const next = before.length + member.name.length + 2;
+      el?.setSelectionRange(next, next);
+    });
+  };
 
   // Voice messages: record in the browser, then upload like any attachment.
   const startRecording = async () => {
@@ -369,9 +463,14 @@ function Composer({ disabled }: { disabled: boolean }) {
       imStore.notify('连接未就绪，消息未发送', 'error');
       return;
     }
+    const mentioned = mentions
+      .filter((item) => text.includes(`@${item.name}`))
+      .map((item) => item.uid);
     setValue('');
+    setMentions([]);
+    setMentionQuery(null);
     if (inputRef.current) inputRef.current.style.height = 'auto';
-    void imStore.sendMessage(text);
+    void imStore.sendMessage(text, mentioned);
   };
 
   const submit = (event: FormEvent) => {
@@ -492,6 +591,32 @@ function Composer({ disabled }: { disabled: boolean }) {
         </div>
       ) : null}
 
+      <span
+        data-mention-debug={`${mentionQuery === null ? 'off' : 'on'}:${mentionCandidates.length}:${mentionPool.length}:${isGroupChat ? 'g' : 's'}`}
+        className="hidden"
+      />
+
+      {mentionQuery !== null && mentionCandidates.length > 0 ? (
+        <div
+          data-mention-picker="true"
+          className="mx-2 mb-1 max-h-40 w-56 overflow-y-auto rounded-xl border border-slate-200 bg-white py-1 text-xs shadow-lg dark:border-slate-700 dark:bg-slate-900"
+        >
+          <p className="px-2.5 py-1 text-[11px] text-slate-400">选择要提醒的成员</p>
+          {mentionCandidates.map((member) => (
+            <button
+              key={member.uid}
+              type="button"
+              data-mention-option={member.uid}
+              onClick={() => pickMention(member)}
+              className="block w-full truncate px-2.5 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-slate-800"
+            >
+              {member.name}
+              <span className="ml-1 text-[10px] text-slate-400">{member.uid}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       {quote ? (
         <div className="mx-2 mb-1 flex items-start gap-2 rounded-lg border-l-2 border-indigo-400 bg-slate-100 px-2 py-1 text-[11px] text-slate-500 dark:bg-slate-800 dark:text-slate-400">
           <span className="line-clamp-2 flex-1" data-quote-preview>
@@ -512,6 +637,11 @@ function Composer({ disabled }: { disabled: boolean }) {
         onChange={(event) => {
           setValue(event.target.value);
           if (event.target.value.trim() !== '') imStore.notifyTyping();
+          // "@" opens the member picker inside group chats.
+          const caret = event.target.selectionStart ?? event.target.value.length;
+          const before = event.target.value.slice(0, caret);
+          const match = isGroupChat ? before.match(/@([^@\s]*)$/) : null;
+          setMentionQuery(match ? match[1] : null);
           const el = event.currentTarget;
           el.style.height = 'auto';
           el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
@@ -544,6 +674,8 @@ export function ChatPanel() {
   const [mergePending, setMergePending] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [swipeX, setSwipeX] = useState(0);
+  const swipeStart = useRef<{ x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ message: UiMessage; x: number; y: number } | null>(null);
   const [editTarget, setEditTarget] = useState<string | null>(null);
   const [forwardTargets, setForwardTargets] = useState<string[]>([]);
@@ -629,6 +761,28 @@ export function ChatPanel() {
     <section
       className="flex min-w-0 flex-1 flex-col bg-slate-100 dark:bg-slate-950"
       aria-label="聊天"
+      style={swipeX > 0 ? { transform: `translateX(${swipeX}px)`, transition: 'transform 120ms ease-out' } : undefined}
+      onTouchStart={(event) => {
+        const touch = event.touches[0];
+        swipeStart.current = touch ? { x: touch.clientX, y: touch.clientY } : null;
+      }}
+      onTouchMove={(event) => {
+        const start = swipeStart.current;
+        const touch = event.touches[0];
+        if (!start || !touch) return;
+        const dx = touch.clientX - start.x;
+        const dy = touch.clientY - start.y;
+        // Swipe right on narrow screens returns to the list (mobile back).
+        if (window.innerWidth < 768 && dx > 20 && Math.abs(dy) < 40) {
+          setSwipeX(Math.min(dx, 120));
+        }
+      }}
+      onTouchEnd={() => {
+        const start = swipeStart.current;
+        swipeStart.current = null;
+        if (start && swipeX > 90) imStore.clearActive();
+        setSwipeX(0);
+      }}
       onDragOver={(event) => {
         if (!event.dataTransfer?.types.includes('Files')) return;
         event.preventDefault();

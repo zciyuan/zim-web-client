@@ -9,6 +9,7 @@ import { formatClock, formatListTime, messagePreview, previewConversation } from
 
 const TABS: { key: Tab; icon: string; label: string }[] = [
   { key: 'conversations', icon: '💬', label: '会话' },
+  { key: 'unread', icon: '🔔', label: '未读' },
   { key: 'friends', icon: '👥', label: '好友' },
   { key: 'groups', icon: '🏠', label: '群聊' },
 ];
@@ -65,6 +66,14 @@ function Rail() {
               <span>{tab.label}</span>
               {tab.key === 'conversations' && total > 0 ? (
                 <span className="absolute top-1 right-2 min-w-4 rounded-full bg-rose-500 px-1 text-[10px] leading-4 text-white">
+                  {total > 99 ? '99+' : total}
+                </span>
+              ) : null}
+              {tab.key === 'unread' && total > 0 ? (
+                <span
+                  data-unread-total
+                  className="absolute top-1 right-2 min-w-4 rounded-full bg-rose-500 px-1 text-[10px] leading-4 text-white"
+                >
                   {total > 99 ? '99+' : total}
                 </span>
               ) : null}
@@ -132,6 +141,8 @@ function Sidebar() {
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [addFriendOpen, setAddFriendOpen] = useState(false);
   const [menuCid, setMenuCid] = useState<string | null>(null);
+  const pullStart = useRef<number | null>(null);
+  const [pullOffset, setPullOffset] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [keyword, setKeyword] = useState('');
   const searchInput = useRef<HTMLInputElement>(null);
@@ -154,10 +165,12 @@ function Sidebar() {
   useEffect(() => {
     if (searchOpen) searchInput.current?.focus();
   }, [searchOpen]);
+  const unreadTotal = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
   const title =
-    state.tab === 'friends' ? `好友（${state.friends.length}）`
-      : state.tab === 'groups' ? `群聊（${state.groups.length}）`
-        : '会话';
+    state.tab === 'unread' ? `未读（${unreadTotal}）`
+      : state.tab === 'friends' ? `好友（${state.friends.length}）`
+        : state.tab === 'groups' ? `群聊（${state.groups.length}）`
+          : '会话';
 
   return (
     <section
@@ -261,7 +274,90 @@ function Sidebar() {
         </div>
       ) : null}
 
-      <div className="flex-1 overflow-y-auto px-2 pb-3">
+      <div
+        className="relative flex-1 overflow-y-auto px-2 pb-3"
+        data-list-scroll
+        onTouchStart={(event) => {
+          pullStart.current = event.currentTarget.scrollTop === 0
+            ? event.touches[0]?.clientY ?? null
+            : null;
+        }}
+        onTouchMove={(event) => {
+          if (pullStart.current === null) return;
+          const delta = (event.touches[0]?.clientY ?? pullStart.current) - pullStart.current;
+          setPullOffset(delta > 0 ? Math.min(delta, 80) : 0);
+        }}
+        onTouchEnd={() => {
+          if (pullOffset > 50) void imStore.refresh();
+          setPullOffset(0);
+          pullStart.current = null;
+        }}
+      >
+        {pullOffset > 0 ? (
+          <div
+            data-pull-hint={Math.round(pullOffset)}
+            style={{ height: pullOffset }}
+            className="flex items-center justify-center overflow-hidden text-[11px] text-slate-400"
+          >
+            {pullOffset > 50 ? '松开刷新' : '下拉刷新'}
+          </div>
+        ) : null}
+        {state.tab === 'unread' ? (
+          <div data-unread-page>
+            {state.conversations.filter((item) => Number(item.unread ?? 0) > 0).length === 0 ? (
+              <EmptyList text="没有未读消息" />
+            ) : (
+              <>
+                <div className="mb-2 flex items-center justify-between px-1">
+                  <span className="text-[11px] text-slate-400">
+                    {state.conversations.filter((item) => Number(item.unread ?? 0) > 0).length} 个会话有未读
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="全部标为已读"
+                    onClick={() => {
+                      for (const item of state.conversations) {
+                        if (Number(item.unread ?? 0) > 0) void imStore.markRead(item.conversation_id);
+                      }
+                    }}
+                    className="rounded-lg border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:border-indigo-400 dark:border-slate-700"
+                  >
+                    全部已读
+                  </button>
+                </div>
+                {[...state.conversations]
+                  .filter((item) => Number(item.unread ?? 0) > 0)
+                  .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0))
+                  .map((conversation) => {
+                    const name = imStore.conversationTitle(conversation);
+                    const unread = Number(conversation.unread ?? 0);
+                    return (
+                      <button
+                        key={conversation.conversation_id}
+                        type="button"
+                        data-unread-row={conversation.conversation_id}
+                        onClick={() => void imStore.openConversation(conversation.conversation_id)}
+                        className="flex w-full items-center gap-2.5 rounded-xl p-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                      >
+                        <Avatar name={name} seed={conversation.conversation_id} />
+                        <span className="min-w-0 flex-1">
+                          <span className="flex items-baseline justify-between gap-2">
+                            <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
+                            <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
+                          </span>
+                          <span className="mt-0.5 block truncate text-xs text-slate-500">{previewConversation(conversation)}</span>
+                        </span>
+                        <span className="shrink-0 rounded-full bg-rose-500 px-1.5 text-[11px] leading-[18px] text-white">
+                          {unread > 99 ? '99+' : unread}
+                        </span>
+                      </button>
+                    );
+                  })}
+              </>
+            )}
+          </div>
+        ) : null}
+
         {state.tab === 'conversations' ? (
           state.conversations.length === 0 ? (
             <EmptyList text="还没有会话，去「好友」发起聊天" />

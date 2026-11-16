@@ -207,3 +207,20 @@ export const daySeparator = (previous?: number, current?: number): string => {
     ? `${at.getMonth() + 1}月${at.getDate()}日`
     : `${at.getFullYear()}年${at.getMonth() + 1}月${at.getDate()}日`;
 };
+/** Name/size of an in-flight upload ({uploading:true,...} content). */
+export const uploadOf = (raw: string): { name: string; size: number } | null => {
+  const parsed = parseContent(raw);
+  if (!parsed || !parsed.uploading) return null;
+  return {
+    name: typeof parsed.name === 'string' ? parsed.name : '附件',
+    size: typeof parsed.size === 'number' ? parsed.size : 0,
+  };
+};
+/** Mentioned uids carried in a text message ({text, at:[uid]}). */
+export const atOf = (raw: string): string[] => {
+  const parsed = parseContent(raw);
+  if (!parsed) return [];
+  const at = parsed.at;
+  if (!Array.isArray(at)) return [];
+  return at.map((item) => String(item));
+};

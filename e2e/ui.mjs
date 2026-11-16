@@ -482,7 +482,7 @@ const main = async () => {
   await alice.screenshot({ path: path.join(OUT, '15-attachment.png') });
   step('group tab opens a group thread');
   await alice.bringToFront();
-  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await alice.waitForFunction(
     () => document.querySelector('[aria-label="列表"] h2')?.textContent?.includes('群聊'),
     { timeout: 10_000 },
@@ -510,7 +510,7 @@ const main = async () => {
   });
 
   step('create a group from a friend');
-  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await clickByText(alice, '[aria-label="列表"] button', '新建');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
   const newGroupName = `E2E 群 ${Date.now() % 10000}`;
@@ -640,7 +640,7 @@ const main = async () => {
   step('group voice call rings every member');
   await alice.bringToFront();
   // Use the group list: a fresh group has no conversation row until it gets a message.
-  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
   const groupCallTarget = await alice.evaluate(() => {
     const state = window.__zim.getSnapshot();
@@ -701,7 +701,7 @@ const main = async () => {
 
   step('group video call renders a participant grid');
   await alice.bringToFront();
-  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
@@ -863,7 +863,7 @@ const main = async () => {
   step('read receipt reaches the sender');
   // Move alice away so bob's next message stays unread for her.
   await alice.bringToFront();
-  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await bob.bringToFront();
   await jsClick(bob, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(bob, 'Alice', 'Alice', '[aria-label="聊天"] header');
@@ -986,6 +986,126 @@ const main = async () => {
     () => (window.__zim.getSnapshot().toast?.text ?? '').includes('个会话'),
     { timeout: 20_000 },
   );
+
+  step('unread page lists conversations with unread messages');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(2)');
+  await alice.waitForSelector('[data-unread-page]', { timeout: 10_000 });
+  const unreadRows = await alice.evaluate(() => document.querySelectorAll('[data-unread-row]').length);
+  assert.ok(unreadRows > 0, `unread page has no rows: ${unreadRows}`);
+  await alice.evaluate(() => document.querySelector('[data-unread-row]')?.click());
+  await alice.waitForFunction(
+    () => Boolean(window.__zim.getSnapshot().activeCid),
+    { timeout: 15_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '32-unread.png') });
+
+  step('mention picker inserts a member mention');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
+  await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
+  await setValue(alice, 'textarea', '@');
+  await alice.waitForSelector('[data-mention-picker]', { timeout: 10_000 });
+  const mentionName = await alice.evaluate(() => {
+    const option = document.querySelector('[data-mention-option]');
+    if (!option) return '';
+    const name = option.textContent ?? '';
+    option.click();
+    return name;
+  });
+  assert.ok(mentionName.includes('Bob'), `unexpected mention candidate: ${mentionName}`);
+  await alice.waitForFunction(
+    () => (document.querySelector('textarea')?.value ?? '').includes('@'),
+    { timeout: 10_000 },
+  );
+  await setValue(alice, 'textarea', `@${mentionName.replace(/\s*\d+$/, '').trim()} 请看这里 ${Date.now() % 10000}`);
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    button?.click();
+  });
+  await alice.waitForFunction(
+    () => [...document.querySelectorAll('[aria-label="聊天"] [data-mention]')].length > 0,
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '33-mention.png') });
+
+  step('upload shows a percentage while sending');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  const cdp = await alice.createCDPSession();
+  await cdp.send('Network.emulateNetworkConditions', {
+    offline: false,
+    latency: 20,
+    downloadThroughput: 200 * 1024,
+    uploadThroughput: 40 * 1024,
+  });
+  try {
+    const bigFile = path.join(OUT, 'e2e-big.png');
+    fs.writeFileSync(bigFile, Buffer.concat([fs.readFileSync(path.resolve('public/icon-192.png')), Buffer.alloc(400 * 1024, 7)]));
+    const bigInput = await alice.$('input[type="file"]');
+    assert.ok(bigInput, 'image picker input is missing');
+    await bigInput.uploadFile(bigFile);
+    await alice.waitForSelector('[data-upload-progress]', { timeout: 20_000 });
+    await alice.screenshot({ path: path.join(OUT, '34-progress.png') });
+  } finally {
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+    });
+    await cdp.detach().catch(() => undefined);
+  }
+
+  step('mobile pull-to-refresh and swipe back');
+  await alice.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+  await alice.bringToFront();
+  // Narrow screens show one pane: clear the active chat so the list is visible.
+  await alice.evaluate(() => window.__zim.clearActive());
+  await alice.waitForSelector('[data-list-scroll]', { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const list = document.querySelector('[data-list-scroll]');
+    if (list) list.scrollTop = 0;
+  });
+  const pullResult = await alice.evaluate(() => {
+    const list = document.querySelector('[data-list-scroll]');
+    if (!list) return 'no-list';
+    const make = (y) => new Touch({ identifier: 1, target: list, clientX: 20, clientY: y });
+    list.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [make(10)], targetTouches: [make(10)], changedTouches: [make(10)] }));
+    list.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, touches: [make(70)], targetTouches: [make(70)], changedTouches: [make(70)] }));
+    return 'dispatched';
+  });
+  assert.equal(pullResult, 'dispatched');
+  await alice.waitForSelector('[data-pull-hint]', { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const list = document.querySelector('[data-list-scroll]');
+    const make = (y) => new Touch({ identifier: 1, target: list, clientX: 20, clientY: y });
+    list.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [make(70)] }));
+  });
+  await alice.waitForFunction(
+    () => (window.__zim.getSnapshot().toast?.text ?? '').includes('已刷新'),
+    { timeout: 30_000 },
+  );
+  // Swipe right inside a chat returns to the list on a phone-sized viewport.
+  await alice.evaluate(() => window.__zim.openConversation('s_10001_10002'));
+  await alice.waitForFunction(
+    () => window.__zim.getSnapshot().activeCid === 's_10001_10002',
+    { timeout: 15_000 },
+  );
+  await alice.evaluate(() => {
+    const panel = document.querySelector('[aria-label="聊天"]');
+    const make = (x) => new Touch({ identifier: 2, target: panel, clientX: x, clientY: 300 });
+    panel.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [make(10)], targetTouches: [make(10)], changedTouches: [make(10)] }));
+    panel.dispatchEvent(new TouchEvent('touchmove', { bubbles: true, cancelable: true, touches: [make(160)], targetTouches: [make(160)], changedTouches: [make(160)] }));
+    panel.dispatchEvent(new TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: [make(160)] }));
+  });
+  const swipeState = await alice.evaluate(() => window.__zim.getSnapshot().activeCid);
+  assert.equal(swipeState, null, `swipe back did not clear the chat: ${swipeState}`);
+  await alice.screenshot({ path: path.join(OUT, '35-mobile.png') });
+  await alice.setViewport({ width: 1440, height: 900 });
 
   step('conversation can be pinned and unpinned');
   await alice.bringToFront();

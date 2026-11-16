@@ -169,6 +169,8 @@ export class IMHttp {
     name: string;
     mime: string;
     kind?: 'image' | 'voice' | 'video' | 'file';
+    /** progress callback (0-100); when present the PUT uses XHR. */
+    onProgress?: (percent: number) => void;
   }): Promise<{ url: string; objectKey: string; size: number }> {
     const kind = file.kind
       ?? (file.mime.startsWith('image/') ? 'image' : file.mime.startsWith('audio/') ? 'voice' : 'file');
@@ -187,12 +189,18 @@ export class IMHttp {
       },
     });
 
-    const response = await this.fetchImpl(this.absolute(intent.upload_url), {
-      method: intent.method || 'PUT',
-      headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': file.mime },
-      body: file.blob,
-    });
-    if (!response.ok) throw new ImError(0, `上传失败：HTTP ${response.status}`);
+    const uploadUrl = this.absolute(intent.upload_url);
+    const method = intent.method || 'PUT';
+    if (file.onProgress && typeof XMLHttpRequest !== 'undefined') {
+      await uploadWithProgress(uploadUrl, method, file.blob, file.mime, this.accessToken, file.onProgress);
+    } else {
+      const response = await this.fetchImpl(uploadUrl, {
+        method,
+        headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': file.mime },
+        body: file.blob,
+      });
+      if (!response.ok) throw new ImError(0, `上传失败：HTTP ${response.status}`);
+    }
 
     return { url: intent.download_url, objectKey: intent.object_key, size: file.blob.size };
   }
@@ -346,4 +354,36 @@ export class IMHttp {
       params: { status },
     }).then((data) => data.applies ?? []);
   }
+}
+
+/** XHR-based upload so the UI can show a percentage. */
+function uploadWithProgress(
+  url: string,
+  method: string,
+  blob: Blob,
+  mime: string,
+  accessToken: string,
+  onProgress: (percent: number) => void,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open(method, url, true);
+    if (accessToken) request.setRequestHeader('Authorization', `Bearer ${accessToken}`);
+    request.setRequestHeader('Content-Type', mime);
+    request.upload.onprogress = (event) => {
+      if (!event.lengthComputable || event.total === 0) return;
+      onProgress(Math.min(99, Math.round((event.loaded / event.total) * 100)));
+    };
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(100);
+        resolve();
+        return;
+      }
+      reject(new ImError(0, `上传失败：HTTP ${request.status}`));
+    };
+    request.onerror = () => reject(new ImError(0, '上传失败：网络错误'));
+    request.ontimeout = () => reject(new ImError(0, '上传超时'));
+    request.send(blob);
+  });
 }

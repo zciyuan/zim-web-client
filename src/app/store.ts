@@ -104,11 +104,13 @@ const DEVICE_KEY = 'zim.device';
 const ENDPOINT_KEY = 'zim.endpoint';
 const SDK_VERSION = 'web-2.0.0';
 
-export type Tab = 'conversations' | 'friends' | 'groups';
+export type Tab = 'conversations' | 'unread' | 'friends' | 'groups';
 export type AppStatus = 'idle' | 'restoring' | 'authenticating' | 'ready';
 
 export interface UiMessage extends MessageItem {
   localState?: 'sending' | 'sent' | 'failed';
+  /** upload percentage (0-100) while an attachment is still uploading */
+  progress?: number;
 }
 
 export interface Thread {
@@ -359,6 +361,11 @@ class ImStore {
   };
 
   getSnapshot = (): ImState => this.state;
+
+  /** Current user (null before login). */
+  get me(): Me | null {
+    return this.state.me;
+  }
 
   private set(patch: Partial<ImState>): void {
     this.state = { ...this.state, ...patch };
@@ -1325,7 +1332,7 @@ class ImStore {
   // ------------------------------------------------------------------ send --
 
   /** Sends a text message (msg_type 1). */
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string, atUids: string[] = []): Promise<void> {
     const content = text.trim();
     if (!content) return;
     // A pending quote target turns the next text into a 1504 reply.
@@ -1333,7 +1340,12 @@ class ImStore {
       await this.sendQuote(content);
       return;
     }
-    await this.sendContent(1, JSON.stringify({ text: content }));
+    const clean = atUids.filter(Boolean);
+    await this.sendContent(
+      1,
+      JSON.stringify(clean.length > 0 ? { text: content, at: clean } : { text: content }),
+      clean,
+    );
   }
 
   /** Uploads an image then sends it as msg_type 2. */
@@ -1355,28 +1367,36 @@ class ImStore {
       return;
     }
 
-    this.notify(kind === 'image' ? '图片上传中…' : '附件上传中…');
+    if (kind === 'image') {
+      await this.sendImage(file);
+      return;
+    }
+    const msgType = kind === 'voice' ? 3 : kind === 'video' ? 4 : 5;
+    const started = this.appendDraft(
+      msgType,
+      JSON.stringify({ uploading: true, name: file.name, size: file.size }),
+      { progress: 0 },
+    );
+    if (!started) return;
+    const { draft } = started;
+    const cid = started.conversation.conversation_id;
     try {
+      const duration = await measureMedia(file, kind === 'voice' ? 'audio' : 'video');
       const uploaded = await this.rest.uploadFile({
         blob: file,
         name: file.name || 'attachment',
         mime,
         kind,
+        onProgress: (percent) => this.updateMessage(cid, draft.client_msg_id, { progress: percent }),
       });
-      if (kind === 'image') {
-        await this.sendImage(file);
-        return;
-      }
-      const duration = await measureMedia(file, kind === 'voice' ? 'audio' : 'video');
-      const msgType = kind === 'voice' ? 3 : kind === 'video' ? 4 : 5;
-      const content = kind === 'voice'
+      const content = JSON.stringify(kind === 'voice' || kind === 'video'
         ? { url: uploaded.url, duration_ms: duration, size: uploaded.size, mime, name: file.name }
-        : kind === 'video'
-          ? { url: uploaded.url, duration_ms: duration, size: uploaded.size, mime, name: file.name }
-          : { url: uploaded.url, name: file.name, size: uploaded.size, mime };
-      await this.sendContent(msgType, JSON.stringify(content));
+        : { url: uploaded.url, name: file.name, size: uploaded.size, mime });
+      this.updateMessage(cid, draft.client_msg_id, { content, progress: undefined });
+      await this.deliver({ ...draft, content }, started.conversation);
       this.notify(kind === 'voice' ? '语音已发送' : kind === 'video' ? '视频已发送' : '文件已发送');
     } catch (err) {
+      this.updateMessage(cid, draft.client_msg_id, { localState: 'failed', progress: undefined });
       this.notify(`附件发送失败：${wrapError(err).display}`, 'error');
     }
   }
@@ -1393,32 +1413,47 @@ class ImStore {
       return;
     }
 
-    this.notify('图片上传中…');
+    const started = this.appendDraft(
+      2,
+      JSON.stringify({ uploading: true, name: file.name, size: file.size }),
+      { progress: 0 },
+    );
+    if (!started) return;
+    const { draft } = started;
+    const cid = started.conversation.conversation_id;
     try {
       const dimensions = await measureImage(file);
       const uploaded = await this.rest.uploadFile({
         blob: file,
         name: file.name || 'image.png',
         mime: file.type || 'image/png',
+        onProgress: (percent) => this.updateMessage(cid, draft.client_msg_id, { progress: percent }),
       });
-      await this.sendContent(2, JSON.stringify({
+      const content = JSON.stringify({
         url: uploaded.url,
         width: dimensions.width,
         height: dimensions.height,
         size: uploaded.size,
         name: file.name,
-      }));
+      });
+      this.updateMessage(cid, draft.client_msg_id, { content, progress: undefined });
+      await this.deliver({ ...draft, content }, started.conversation);
     } catch (err) {
+      this.updateMessage(cid, draft.client_msg_id, { localState: 'failed', progress: undefined });
       this.notify(wrapError(err).display, 'error');
     }
   }
 
   /** Shared send path: optimistic draft, 1501/1502, then server truth. */
-  private async sendContent(msgType: number, content: string): Promise<void> {
+  /** Appends an optimistic draft bubble and returns it with its conversation. */
+  private appendDraft(
+    msgType: number,
+    content: string,
+    extra: Partial<UiMessage> = {},
+  ): { draft: UiMessage; conversation: Conversation } | null {
     const cid = this.state.activeCid;
     const conversation = this.conversation(cid);
-    if (!conversation || !this.client) return;
-
+    if (!conversation || !this.client) return null;
     const draft: UiMessage = {
       server_msg_id: '',
       client_msg_id: crypto.randomUUID(),
@@ -1433,11 +1468,18 @@ class ImStore {
       send_time: String(Date.now()),
       status: 0,
       localState: 'sending',
+      ...extra,
     };
-
     const thread = this.state.threads[conversation.conversation_id] ?? emptyThread();
     this.patchThread(conversation.conversation_id, { items: [...thread.items, draft] });
-    await this.deliver(draft, conversation);
+    return { draft, conversation };
+  }
+
+  /** Shared send path: optimistic draft, 1501/1502, then server truth. */
+  private async sendContent(msgType: number, content: string, atUserIds: string[] = []): Promise<void> {
+    const started = this.appendDraft(msgType, content, atUserIds.length > 0 ? { at_user_ids: atUserIds } : {});
+    if (!started) return;
+    await this.deliver(started.draft, started.conversation);
   }
 
   async retryMessage(message: UiMessage): Promise<void> {
