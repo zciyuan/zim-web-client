@@ -224,11 +224,53 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
 
         {tab === 'members' ? (
           <div>
-            <div className="mb-2 flex gap-1.5">
-              <input value={inviteUids} onChange={(event) => setInviteUids(event.target.value)} placeholder="邀请好友 uid，逗号分隔" className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-800" />
-              <button type="button" className="rounded-lg border border-slate-200 px-2 py-1 text-xs dark:border-slate-700" onClick={() => void run('invite', async () => { const ids = inviteUids.split(',').map((item) => item.trim()).filter(Boolean); if (ids.length) await imStore.inviteGroupMembers(gid, ids); setInviteUids(''); })}>
-                邀请
-              </button>
+            <div className="mb-2 rounded-xl border border-slate-200 dark:border-slate-700">
+              <div className="flex items-center justify-between px-2 py-1 text-[11px] text-slate-500">
+                <span>邀请好友（可多选）</span>
+                <button
+                  type="button"
+                  data-invite-selected
+                  disabled={inviteUids.length === 0}
+                  onClick={() => void run('invite', async () => {
+                    const ids = inviteUids.split(',').map((item) => item.trim()).filter(Boolean);
+                    if (ids.length) await imStore.inviteGroupMembers(gid, ids);
+                    setInviteUids('');
+                  })}
+                  className="rounded border border-slate-200 px-2 py-0.5 disabled:opacity-40 dark:border-slate-600"
+                >
+                  邀请已选（{inviteUids ? inviteUids.split(',').filter(Boolean).length : 0}）
+                </button>
+              </div>
+              <div className="max-h-28 overflow-y-auto px-1 pb-1">
+                {state.friends.length === 0 ? (
+                  <p className="px-1 py-2 text-[11px] text-slate-400">还没有好友可邀请</p>
+                ) : null}
+                {state.friends.map((friend) => {
+                  const uid = String(friend.friend_id);
+                  const inGroup = (members ?? []).some((member) => String(member.user_id) === uid);
+                  const picked = inviteUids.split(',').filter(Boolean).includes(uid);
+                  return (
+                    <label
+                      key={uid}
+                      className={`flex items-center gap-2 rounded-lg px-1.5 py-1 text-[12px] ${inGroup ? 'opacity-40' : 'hover:bg-slate-50 dark:hover:bg-slate-800/60'}`}
+                    >
+                      <input
+                        type="checkbox"
+                        data-invite-friend={uid}
+                        disabled={inGroup}
+                        checked={picked}
+                        onChange={() => {
+                          const current = inviteUids.split(',').filter(Boolean);
+                          const next = picked ? current.filter((item) => item !== uid) : [...current, uid];
+                          setInviteUids(next.join(','));
+                        }}
+                      />
+                      <span className="truncate">{imStore.friendName(uid)}</span>
+                      {inGroup ? <span className="text-[10px] text-slate-400">已在群里</span> : null}
+                    </label>
+                  );
+                })}
+              </div>
             </div>
             <input
               value={memberQuery}

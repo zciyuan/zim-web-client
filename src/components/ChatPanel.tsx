@@ -128,6 +128,8 @@ function Bubble({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [expanded, setExpanded] = useState(false);
+  const [imageFailed, setImageFailed] = useState(false);
+  const [imageKey, setImageKey] = useState(0);
 
   // The context menu's 「编辑」 opens this bubble's inline editor.
   useEffect(() => {
@@ -235,12 +237,33 @@ function Bubble({
               state === 'failed' ? 'border-rose-400 bg-transparent' : ''
             }`}
           >
-            <img
-              src={imStore.assetUrl(image.url)}
-              alt="图片消息"
-              loading="lazy"
-              className="max-h-[240px] max-w-[280px] rounded-xl object-cover"
-            />
+            {imageFailed ? (
+              <span data-image-error className="flex h-24 w-56 flex-col items-center justify-center gap-1 text-[11px] text-slate-500">
+                图片加载失败
+                <span
+                  role="button"
+                  tabIndex={0}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setImageFailed(false);
+                    setImageKey((current) => current + 1);
+                  }}
+                  onKeyDown={() => undefined}
+                  className="cursor-pointer text-indigo-600 underline"
+                >
+                  重试
+                </span>
+              </span>
+            ) : (
+              <img
+                key={imageKey}
+                src={imStore.assetUrl(image.url)}
+                alt="图片消息"
+                loading="lazy"
+                onError={() => setImageFailed(true)}
+                className="max-h-[240px] max-w-[280px] rounded-xl object-cover"
+              />
+            )}
             {image.width > 0 && image.height > 0 ? (
               <span className="mt-1 block text-[10px] text-slate-400">
                 {image.width}×{image.height}
@@ -786,6 +809,8 @@ export function ChatPanel() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [mergePending, setMergePending] = useState(false);
   const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [previewZoom, setPreviewZoom] = useState(1);
+  const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const [swipeX, setSwipeX] = useState(0);
   const swipeStart = useRef<{ x: number; y: number } | null>(null);
@@ -1164,7 +1189,11 @@ export function ChatPanel() {
                   showSender={Boolean(isGroup)}
                   senderName={imStore.senderName(message.send_id)}
                   onForward={setForwardTarget}
-                  onPreviewImage={setPreviewImage}
+                  onPreviewImage={(url) => {
+                  setPreviewZoom(1);
+                  setPreviewPan({ x: 0, y: 0 });
+                  setPreviewImage(url);
+                }}
                 onMenu={(target, x, y) => setContextMenu({ message: target, x, y })}
                 autoEdit={Boolean(editTarget) && editTarget === message.server_msg_id}
                 canRetryUpload={state.uploadRetries.includes(message.client_msg_id)}
@@ -1440,7 +1469,21 @@ export function ChatPanel() {
           <img
             src={previewImage}
             alt="预览"
-            className="max-h-full max-w-full rounded-xl object-contain shadow-2xl"
+            data-preview-image
+            style={{
+              transform: `scale(${previewZoom}) translate(${previewPan.x}px, ${previewPan.y}px)`,
+              cursor: previewZoom > 1 ? 'grab' : 'zoom-in',
+            }}
+            className="max-h-full max-w-full rounded-xl object-contain shadow-2xl transition-transform"
+            onWheel={(event) => {
+              event.preventDefault();
+              setPreviewZoom((current) => Math.min(4, Math.max(1, current - Math.sign(event.deltaY) * 0.2)));
+            }}
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              setPreviewZoom((current) => (current > 1 ? 1 : 2));
+              setPreviewPan({ x: 0, y: 0 });
+            }}
             onClick={(event) => event.stopPropagation()}
           />
           <button
