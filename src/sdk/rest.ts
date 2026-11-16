@@ -191,14 +191,16 @@ export class IMHttp {
 
     const uploadUrl = this.absolute(intent.upload_url);
     const method = intent.method || 'PUT';
+    // Presigned URLs (MinIO/S3) carry their own signature: an extra
+    // Authorization header would invalidate it, so only send it for our API.
+    const presigned = /[?&]X-Amz-Signature=/i.test(uploadUrl);
+    const token = presigned ? '' : this.accessToken;
     if (file.onProgress && typeof XMLHttpRequest !== 'undefined') {
-      await uploadWithProgress(uploadUrl, method, file.blob, file.mime, this.accessToken, file.onProgress);
+      await uploadWithProgress(uploadUrl, method, file.blob, file.mime, token, file.onProgress);
     } else {
-      const response = await this.fetchImpl(uploadUrl, {
-        method,
-        headers: { Authorization: `Bearer ${this.accessToken}`, 'Content-Type': file.mime },
-        body: file.blob,
-      });
+      const headers: Record<string, string> = { 'Content-Type': file.mime };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await this.fetchImpl(uploadUrl, { method, headers, body: file.blob });
       if (!response.ok) throw new ImError(0, `上传失败：HTTP ${response.status}`);
     }
 
