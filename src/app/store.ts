@@ -149,6 +149,8 @@ export interface ImState {
   unreadAnchors: Record<string, number>;
   /** message to scroll to and flash (global search / quote jump) */
   focusMessageId: string | null;
+  /** drafts whose upload failed and can be retried */
+  uploadRetries: string[];
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -189,6 +191,7 @@ const initialState: ImState = {
   theme: (typeof localStorage !== 'undefined' ? (localStorage.getItem('zim.theme') as ThemeMode | null) : null) ?? 'system',
   unreadAnchors: {},
   focusMessageId: null,
+  uploadRetries: [],
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -311,6 +314,8 @@ class ImStore {
   private restorePromise: Promise<void> | null = null;
   /** Pushes that arrived while a thread page was still loading, keyed by cid. */
   private pendingPushes = new Map<string, UiMessage[]>();
+  /** Files kept for failed uploads so they can be retried. */
+  private uploadJobs = new Map<string, { file: File; msgType: number }>();
 
   constructor() {
     this.applyTheme();
@@ -1380,6 +1385,7 @@ class ImStore {
     if (!started) return;
     const { draft } = started;
     const cid = started.conversation.conversation_id;
+    this.trackUpload(draft.client_msg_id, file, msgType);
     try {
       const duration = await measureMedia(file, kind === 'voice' ? 'audio' : 'video');
       const uploaded = await this.rest.uploadFile({
@@ -1421,6 +1427,7 @@ class ImStore {
     if (!started) return;
     const { draft } = started;
     const cid = started.conversation.conversation_id;
+    this.trackUpload(draft.client_msg_id, file, 2);
     try {
       const dimensions = await measureImage(file);
       const uploaded = await this.rest.uploadFile({
@@ -1480,6 +1487,78 @@ class ImStore {
     const started = this.appendDraft(msgType, content, atUserIds.length > 0 ? { at_user_ids: atUserIds } : {});
     if (!started) return;
     await this.deliver(started.draft, started.conversation);
+  }
+
+  /** Keeps a failed upload's file so the bubble can offer a retry. */
+  private trackUpload(clientMsgId: string, file: File, msgType: number): void {
+    this.uploadJobs.set(clientMsgId, { file, msgType });
+    this.set({ uploadRetries: [...this.state.uploadRetries, clientMsgId] });
+  }
+
+  private clearUpload(clientMsgId: string): void {
+    this.uploadJobs.delete(clientMsgId);
+    if (this.state.uploadRetries.includes(clientMsgId)) {
+      this.set({ uploadRetries: this.state.uploadRetries.filter((id) => id !== clientMsgId) });
+    }
+  }
+
+  /** Re-uploads a failed attachment draft and sends it when the bytes land. */
+  async retryUpload(clientMsgId: string): Promise<void> {
+    const job = this.uploadJobs.get(clientMsgId);
+    const conversation = this.conversation(this.state.activeCid);
+    const draft = conversation
+      ? this.state.threads[conversation.conversation_id]?.items.find((item) => item.client_msg_id === clientMsgId)
+      : undefined;
+    if (!job || !conversation || !draft) {
+      this.notify('无法重试上传，请重新选择文件', 'error');
+      return;
+    }
+    const cid = conversation.conversation_id;
+    const progress = (percent: number) => this.updateMessage(cid, clientMsgId, { progress: percent });
+    this.updateMessage(cid, clientMsgId, { localState: 'sending', progress: 0 });
+    try {
+      if (job.msgType === 2) {
+        const dimensions = await measureImage(job.file);
+        const uploaded = await this.rest.uploadFile({
+          blob: job.file,
+          name: job.file.name || 'image.png',
+          mime: job.file.type || 'image/png',
+          onProgress: progress,
+        });
+        const content = JSON.stringify({
+          url: uploaded.url,
+          width: dimensions.width,
+          height: dimensions.height,
+          size: uploaded.size,
+          name: job.file.name,
+        });
+        this.updateMessage(cid, clientMsgId, { content, progress: undefined });
+        this.clearUpload(clientMsgId);
+        await this.deliver({ ...draft, content }, conversation);
+        return;
+      }
+      const mime = job.file.type || 'application/octet-stream';
+      const kind: 'voice' | 'video' | 'file' = mime.startsWith('audio/')
+        ? 'voice'
+        : mime.startsWith('video/') ? 'video' : 'file';
+      const duration = await measureMedia(job.file, kind === 'voice' ? 'audio' : 'video');
+      const uploaded = await this.rest.uploadFile({
+        blob: job.file,
+        name: job.file.name || 'attachment',
+        mime,
+        kind,
+        onProgress: progress,
+      });
+      const content = JSON.stringify(kind === 'voice' || kind === 'video'
+        ? { url: uploaded.url, duration_ms: duration, size: uploaded.size, mime, name: job.file.name }
+        : { url: uploaded.url, name: job.file.name, size: uploaded.size, mime });
+      this.updateMessage(cid, clientMsgId, { content, progress: undefined });
+      this.clearUpload(clientMsgId);
+      await this.deliver({ ...draft, content }, conversation);
+    } catch (err) {
+      this.updateMessage(cid, clientMsgId, { localState: 'failed', progress: undefined });
+      this.notify(`上传重试失败：${wrapError(err).display}`, 'error');
+    }
   }
 
   async retryMessage(message: UiMessage): Promise<void> {

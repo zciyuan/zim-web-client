@@ -1031,6 +1031,69 @@ const main = async () => {
   );
   await alice.screenshot({ path: path.join(OUT, '33-mention.png') });
 
+  step('mention picker offers @all and marks the recipient');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
+  await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
+  await setValue(alice, 'textarea', '@');
+  await alice.waitForSelector('[data-mention-option="all"]', { timeout: 10_000 });
+  await jsClick(alice, '[data-mention-option="all"]');
+  await alice.waitForFunction(
+    () => (document.querySelector('textarea')?.value ?? '').includes('@所有人'),
+    { timeout: 10_000 },
+  );
+  const allText = `全体注意 ${Date.now() % 10000}`;
+  await setValue(alice, 'textarea', `@所有人 ${allText}`);
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    button?.click();
+  });
+  await alice.waitForFunction(
+    (needle) => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes(needle) && node.querySelector('[data-mention]')),
+    { timeout: 20_000 },
+    allText,
+  );
+
+  step('failed upload can be retried from the bubble');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  const uploadCdp = await alice.createCDPSession();
+  await uploadCdp.send('Network.setBlockedURLs', { urls: ['*upload*', '*v1/files*'] });
+  try {
+    const retryFile = path.join(OUT, 'e2e-retry.png');
+    fs.copyFileSync(path.resolve('public/icon-192.png'), retryFile);
+    const retryInput = await alice.$('input[type="file"]');
+    assert.ok(retryInput, 'image picker input is missing');
+    await retryInput.uploadFile(retryFile);
+    await alice.waitForSelector('[data-retry-upload="true"]', { timeout: 30_000 });
+    await alice.screenshot({ path: path.join(OUT, '36-upload-retry.png') });
+  } finally {
+    await uploadCdp.send('Network.setBlockedURLs', { urls: [] });
+  }
+  await jsClick(alice, '[data-retry-upload="true"]');
+  await alice.waitForFunction(
+    () => document.querySelector('[data-retry-upload="true"]') === null,
+    { timeout: 30_000 },
+  );
+
+  step('long-press opens the conversation menu');
+  await alice.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+  await alice.bringToFront();
+  await alice.evaluate(() => window.__zim.clearActive());
+  await alice.waitForSelector('[data-conversation-row]', { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const row = document.querySelector('[data-conversation-row]');
+    const touch = new Touch({ identifier: 3, target: row, clientX: 60, clientY: 120 });
+    row.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: [touch], targetTouches: [touch], changedTouches: [touch] }));
+  });
+  await alice.waitForSelector('[data-conversation-actions]', { timeout: 10_000 });
+  await alice.screenshot({ path: path.join(OUT, '37-long-press.png') });
+  await alice.setViewport({ width: 1440, height: 900 });
+
   step('upload shows a percentage while sending');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');

@@ -142,6 +142,7 @@ function Sidebar() {
   const [addFriendOpen, setAddFriendOpen] = useState(false);
   const [menuCid, setMenuCid] = useState<string | null>(null);
   const pullStart = useRef<number | null>(null);
+  const pressTimer = useRef<number | null>(null);
   const [pullOffset, setPullOffset] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [keyword, setKeyword] = useState('');
@@ -165,7 +166,25 @@ function Sidebar() {
   useEffect(() => {
     if (searchOpen) searchInput.current?.focus();
   }, [searchOpen]);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const unreadTotal = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
+  // Unread page groups by chat kind so long lists stay scannable.
+  const unreadGroups = [
+    {
+      key: 'single',
+      label: '单聊',
+      rows: state.conversations
+        .filter((item) => Number(item.unread ?? 0) > 0 && item.type !== 2)
+        .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0)),
+    },
+    {
+      key: 'group',
+      label: '群聊',
+      rows: state.conversations
+        .filter((item) => Number(item.unread ?? 0) > 0 && item.type === 2)
+        .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0)),
+    },
+  ].filter((group) => group.rows.length > 0);
   const title =
     state.tab === 'unread' ? `未读（${unreadTotal}）`
       : state.tab === 'friends' ? `好友（${state.friends.length}）`
@@ -304,13 +323,13 @@ function Sidebar() {
         ) : null}
         {state.tab === 'unread' ? (
           <div data-unread-page>
-            {state.conversations.filter((item) => Number(item.unread ?? 0) > 0).length === 0 ? (
+            {unreadTotal === 0 ? (
               <EmptyList text="没有未读消息" />
             ) : (
               <>
                 <div className="mb-2 flex items-center justify-between px-1">
                   <span className="text-[11px] text-slate-400">
-                    {state.conversations.filter((item) => Number(item.unread ?? 0) > 0).length} 个会话有未读
+                    {unreadGroups.reduce((sum, group) => sum + group.rows.length, 0)} 个会话有未读
                   </span>
                   <button
                     type="button"
@@ -325,34 +344,51 @@ function Sidebar() {
                     全部已读
                   </button>
                 </div>
-                {[...state.conversations]
-                  .filter((item) => Number(item.unread ?? 0) > 0)
-                  .sort((a, b) => Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0))
-                  .map((conversation) => {
-                    const name = imStore.conversationTitle(conversation);
-                    const unread = Number(conversation.unread ?? 0);
-                    return (
+                {unreadGroups.map((group) => {
+                  const collapsed = Boolean(collapsedGroups[group.key]);
+                  return (
+                    <div key={group.key} className="mb-1" data-unread-group={group.key}>
                       <button
-                        key={conversation.conversation_id}
                         type="button"
-                        data-unread-row={conversation.conversation_id}
-                        onClick={() => void imStore.openConversation(conversation.conversation_id)}
-                        className="flex w-full items-center gap-2.5 rounded-xl p-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                        aria-expanded={!collapsed}
+                        onClick={() => setCollapsedGroups((current) => ({ ...current, [group.key]: !collapsed }))}
+                        className="flex w-full items-center justify-between px-2 py-1 text-[11px] font-medium text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
                       >
-                        <Avatar name={name} seed={conversation.conversation_id} />
-                        <span className="min-w-0 flex-1">
-                          <span className="flex items-baseline justify-between gap-2">
-                            <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
-                            <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
-                          </span>
-                          <span className="mt-0.5 block truncate text-xs text-slate-500">{previewConversation(conversation)}</span>
+                        <span>
+                          {collapsed ? '▸' : '▾'} {group.label}（{group.rows.length}）
                         </span>
-                        <span className="shrink-0 rounded-full bg-rose-500 px-1.5 text-[11px] leading-[18px] text-white">
-                          {unread > 99 ? '99+' : unread}
+                        <span className="text-slate-400">
+                          {group.rows.reduce((sum, item) => sum + Number(item.unread ?? 0), 0)} 条
                         </span>
                       </button>
-                    );
-                  })}
+                      {collapsed ? null : group.rows.map((conversation) => {
+                        const name = imStore.conversationTitle(conversation);
+                        const unread = Number(conversation.unread ?? 0);
+                        return (
+                          <button
+                            key={conversation.conversation_id}
+                            type="button"
+                            data-unread-row={conversation.conversation_id}
+                            onClick={() => void imStore.openConversation(conversation.conversation_id)}
+                            className="flex w-full items-center gap-2.5 rounded-xl p-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                          >
+                            <Avatar name={name} seed={conversation.conversation_id} />
+                            <span className="min-w-0 flex-1">
+                              <span className="flex items-baseline justify-between gap-2">
+                                <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
+                                <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
+                              </span>
+                              <span className="mt-0.5 block truncate text-xs text-slate-500">{previewConversation(conversation)}</span>
+                            </span>
+                            <span className="shrink-0 rounded-full bg-rose-500 px-1.5 text-[11px] leading-[18px] text-white">
+                              {unread > 99 ? '99+' : unread}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
               </>
             )}
           </div>
@@ -370,7 +406,22 @@ function Sidebar() {
                 const unread = Number(conversation.unread ?? 0);
                 const active = state.activeCid === conversation.conversation_id;
                 return (
-                  <div key={conversation.conversation_id} className="group relative">
+                  <div
+                    key={conversation.conversation_id}
+                    className="group relative"
+                    onTouchStart={() => {
+                      // Long-press (500ms) opens the actions menu on phones.
+                      pressTimer.current = window.setTimeout(() => setMenuCid(conversation.conversation_id), 500);
+                    }}
+                    onTouchEnd={() => {
+                      if (pressTimer.current) window.clearTimeout(pressTimer.current);
+                      pressTimer.current = null;
+                    }}
+                    onTouchMove={() => {
+                      if (pressTimer.current) window.clearTimeout(pressTimer.current);
+                      pressTimer.current = null;
+                    }}
+                  >
                   <button
                     type="button"
                     onClick={() => void imStore.openConversation(conversation.conversation_id)}

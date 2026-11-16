@@ -46,6 +46,8 @@ function Bubble({
   onPreviewImage?: (url: string) => void;
   onMenu?: (message: UiMessage, x: number, y: number) => void;
   autoEdit?: boolean;
+  canRetryUpload?: boolean;
+  onRetryUpload?: () => void;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
@@ -56,7 +58,7 @@ function Bubble({
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
   const atUids = message.at_user_ids?.length ? message.at_user_ids.map(String) : atOf(message.content);
-  const atMe = !mine && atUids.includes(String(imStore.me?.uid ?? ''));
+  const atMe = !mine && (atUids.includes(String(imStore.me?.uid ?? '')) || atUids.includes('all'));
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
@@ -591,11 +593,6 @@ function Composer({ disabled }: { disabled: boolean }) {
         </div>
       ) : null}
 
-      <span
-        data-mention-debug={`${mentionQuery === null ? 'off' : 'on'}:${mentionCandidates.length}:${mentionPool.length}:${isGroupChat ? 'g' : 's'}`}
-        className="hidden"
-      />
-
       {mentionQuery !== null && mentionCandidates.length > 0 ? (
         <div
           data-mention-picker="true"
@@ -992,6 +989,8 @@ export function ChatPanel() {
                   onPreviewImage={setPreviewImage}
                 onMenu={(target, x, y) => setContextMenu({ message: target, x, y })}
                 autoEdit={Boolean(editTarget) && editTarget === message.server_msg_id}
+                canRetryUpload={state.uploadRetries.includes(message.client_msg_id)}
+                onRetryUpload={() => void imStore.retryUpload(message.client_msg_id)}
                   selectable={selectMode}
                   selected={selectedIds.includes(message.server_msg_id)}
                   onSelect={() => {
