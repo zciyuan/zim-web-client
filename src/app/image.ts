@@ -87,3 +87,32 @@ export const compressImage = async (
     return { file, compressed: false };
   }
 };
+/** Grabs a small poster frame from a video file (null when unsupported). */
+export const captureVideoPoster = async (file: File): Promise<{ poster: string; duration: number } | null> => {
+  if (!file.type.startsWith('video/')) return null;
+  const url = URL.createObjectURL(file);
+  try {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.src = url;
+    await new Promise<void>((resolve, reject) => {
+      video.onloadeddata = () => resolve();
+      video.onerror = () => reject(new Error('video decode failed'));
+      setTimeout(() => resolve(), 2500);
+    });
+    const duration = Number.isFinite(video.duration) ? Math.round(video.duration * 1000) : 0;
+    if (!video.videoWidth || !video.videoHeight) return { poster: '', duration };
+    const width = Math.min(320, video.videoWidth);
+    const height = Math.round((video.videoHeight / video.videoWidth) * width);
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d')?.drawImage(video, 0, 0, width, height);
+    return { poster: canvas.toDataURL('image/jpeg', 0.6), duration };
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+};

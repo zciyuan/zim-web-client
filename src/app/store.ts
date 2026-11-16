@@ -9,7 +9,7 @@ import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
-import { compressImage, measureImage, measureMedia } from './image';
+import { captureVideoPoster, compressImage, measureImage, measureMedia } from './image';
 import {
   OP,
   decodeMessageItem,
@@ -155,6 +155,8 @@ export interface ImState {
   searchHighlight: string;
   /** most recent search keywords (newest first) */
   searchHistory: string[];
+  /** unsent text per conversation (drafts survive switching) */
+  drafts: Record<string, string>;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -198,6 +200,7 @@ const initialState: ImState = {
   uploadRetries: [],
   searchHighlight: '',
   searchHistory: [],
+  drafts: {},
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -326,6 +329,7 @@ class ImStore {
   constructor() {
     this.applyTheme();
     this.loadSearchHistory();
+    this.loadDrafts();
     // "system" keeps following the OS while the app runs.
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -1317,6 +1321,54 @@ class ImStore {
     }
   }
 
+  /** Stores one conversation's unsent draft (empty clears it). */
+  setDraft(cid: string, text: string): void {
+    if (!cid) return;
+    const current = this.state.drafts[cid] ?? '';
+    if (current === text) return;
+    const next = { ...this.state.drafts };
+    if (text.trim() === '') delete next[cid];
+    else next[cid] = text;
+    this.set({ drafts: next });
+    this.scheduleDraftFlush();
+  }
+
+  /** Draft text for a conversation ('' when none). */
+  draftOf(cid: string | null): string {
+    return cid ? this.state.drafts[cid] ?? '' : '';
+  }
+
+  private draftFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private scheduleDraftFlush(): void {
+    if (this.draftFlushTimer) return;
+    this.draftFlushTimer = setTimeout(() => {
+      this.draftFlushTimer = null;
+      try {
+        localStorage.setItem('zim.drafts', JSON.stringify(this.state.drafts));
+      } catch {
+        // private mode: keep drafts in memory only
+      }
+    }, 400);
+  }
+
+  private loadDrafts(): void {
+    try {
+      const raw = localStorage.getItem('zim.drafts');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const next: Record<string, string> = {};
+        for (const [key, value] of Object.entries(parsed)) {
+          if (typeof value === 'string' && value.trim() !== '') next[key] = value;
+        }
+        this.set({ drafts: next });
+      }
+    } catch {
+      // corrupt entry: ignore
+    }
+  }
+
   /** Updates the signed-in user's nickname / avatar. */
   async updateProfile(patch: { nickname?: string; avatar?: string }): Promise<void> {
     const nickname = patch.nickname?.trim();
@@ -1459,6 +1511,7 @@ class ImStore {
     this.trackUpload(draft.client_msg_id, file, msgType);
     try {
       const duration = await measureMedia(file, kind === 'voice' ? 'audio' : 'video');
+      const poster = kind === 'video' ? await captureVideoPoster(file) : null;
       const uploaded = await this.rest.uploadFile({
         blob: file,
         name: file.name || 'attachment',
@@ -1467,7 +1520,14 @@ class ImStore {
         onProgress: (percent) => this.updateMessage(cid, draft.client_msg_id, { progress: percent }),
       });
       const content = JSON.stringify(kind === 'voice' || kind === 'video'
-        ? { url: uploaded.url, duration_ms: duration, size: uploaded.size, mime, name: file.name }
+        ? {
+          url: uploaded.url,
+          duration_ms: poster?.duration || duration,
+          size: uploaded.size,
+          mime,
+          name: file.name,
+          ...(poster?.poster ? { poster: poster.poster } : {}),
+        }
         : { url: uploaded.url, name: file.name, size: uploaded.size, mime });
       this.updateMessage(cid, draft.client_msg_id, { content, progress: undefined });
       await this.deliver({ ...draft, content }, started.conversation);

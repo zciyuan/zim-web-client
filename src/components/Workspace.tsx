@@ -42,6 +42,16 @@ function Rail() {
   const total = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
   const pending = state.friendRequests.length;
   const dot = CONNECTION_COLOR[state.connection] ?? 'bg-slate-400';
+  const [installEvent, setInstallEvent] = useState<{ prompt: () => Promise<void> } | null>(null);
+
+  useEffect(() => {
+    const onPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallEvent(event as unknown as { prompt: () => Promise<void> });
+    };
+    window.addEventListener('beforeinstallprompt', onPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', onPrompt);
+  }, []);
 
   return (
     <aside className="flex w-[76px] shrink-0 flex-col items-center gap-2 border-r border-slate-200 bg-slate-50 px-2 py-3.5 dark:border-slate-800 dark:bg-slate-900">
@@ -128,6 +138,20 @@ function Rail() {
         >
           {state.notifications ? '🔔' : '🔕'}
         </button>
+        {installEvent ? (
+          <button
+            type="button"
+            aria-label="安装应用"
+            data-install-app
+            onClick={() => {
+              void installEvent.prompt();
+              setInstallEvent(null);
+            }}
+            className="rounded-lg border border-indigo-300 px-2 py-1 text-xs text-indigo-600 transition hover:border-indigo-500 dark:border-indigo-800 dark:text-indigo-300"
+          >
+            安装
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={() => imStore.logout()}
@@ -605,7 +629,12 @@ function Sidebar() {
                                     [有人@我]
                                   </span>
                                 ) : null}
-                                <span className="truncate">{previewConversation(conversation)}</span>
+                                {state.drafts[conversation.conversation_id] ? (
+                          <span data-draft-marker className="shrink-0 rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                            草稿
+                          </span>
+                        ) : null}
+                        <span className="truncate">{previewConversation(conversation)}</span>
                               </span>
                             </span>
                             <button
@@ -687,6 +716,11 @@ function Sidebar() {
                             className="shrink-0 rounded bg-rose-100 px-1 text-[10px] font-medium text-rose-600 dark:bg-rose-950 dark:text-rose-300"
                           >
                             [有人@我]
+                          </span>
+                        ) : null}
+                        {state.drafts[conversation.conversation_id] ? (
+                          <span data-draft-marker className="shrink-0 rounded bg-amber-100 px-1 text-[10px] font-medium text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                            草稿
                           </span>
                         ) : null}
                         <span className="truncate">{previewConversation(conversation)}</span>
@@ -872,21 +906,32 @@ export function Workspace() {
     document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) ZIM` : 'ZIM';
   }, [unread]);
 
-  const disconnected = state.connection === 'closed' || state.connection === 'offline' || state.connection === 'error';
+  const [offline, setOffline] = useState(typeof navigator !== 'undefined' && navigator.onLine === false);
+  useEffect(() => {
+    const online = () => setOffline(false);
+    const down = () => setOffline(true);
+    window.addEventListener('online', online);
+    window.addEventListener('offline', down);
+    return () => {
+      window.removeEventListener('online', online);
+      window.removeEventListener('offline', down);
+    };
+  }, []);
+  const disconnected = offline || state.connection === 'closed' || state.connection === 'offline' || state.connection === 'error';
   const reconnecting = state.connection === 'connecting' || state.connection === 'reconnecting';
 
   return (
     <div className="flex h-full flex-col bg-slate-100 dark:bg-slate-950">
       {disconnected || reconnecting ? (
         <div
-          data-connection-banner={state.connection}
+          data-connection-banner={offline ? 'offline' : state.connection}
           className={`flex items-center justify-center gap-2 px-3 py-1 text-xs ${
             disconnected
               ? 'bg-rose-500 text-white'
               : 'bg-amber-400 text-amber-950'
           }`}
         >
-          <span>{disconnected ? '连接已断开，消息可能延迟' : '正在重新连接…'}</span>
+          <span>{offline ? '网络已断开，恢复后会自动同步' : disconnected ? '连接已断开，消息可能延迟' : '正在重新连接…'}</span>
           <button
             type="button"
             data-retry-connection

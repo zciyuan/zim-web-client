@@ -49,6 +49,8 @@ export interface AttachmentInfo {
   size: number;
   mime: string;
   duration: number;
+  /** optional video poster (small JPEG data URL) */
+  poster?: string;
 }
 
 /** Reads the attachment of a voice/video/file message. */
@@ -61,6 +63,7 @@ export const attachmentOf = (raw: string): AttachmentInfo | null => {
     size: typeof parsed.size === 'number' ? parsed.size : 0,
     mime: typeof parsed.mime === 'string' ? parsed.mime : '',
     duration: typeof parsed.duration_ms === 'number' ? parsed.duration_ms : 0,
+    poster: typeof parsed.poster === 'string' ? parsed.poster : '',
   };
 };
 

@@ -263,6 +263,7 @@ function Bubble({
               <video
                 controls
                 preload="metadata"
+                poster={attachment.poster || undefined}
                 src={imStore.assetUrl(attachment.url)}
                 className="max-h-[260px] max-w-[320px] rounded-xl"
               />
@@ -448,6 +449,12 @@ function Composer({ disabled }: { disabled: boolean }) {
   const [recording, setRecording] = useState<{ recorder: MediaRecorder; chunks: Blob[]; startedAt: number } | null>(null);
   const [recordSeconds, setRecordSeconds] = useState(0);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+
+  // Restore the draft of the conversation being opened.
+  useEffect(() => {
+    setValue(imStore.draftOf(state.activeCid));
+    setMentionQuery(null);
+  }, [state.activeCid]);
   const [mentions, setMentions] = useState<{ uid: string; name: string }[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -576,6 +583,7 @@ function Composer({ disabled }: { disabled: boolean }) {
       .filter((item) => text.includes(`@${item.name}`))
       .map((item) => item.uid);
     setValue('');
+    imStore.setDraft(state.activeCid ?? '', '');
     setMentions([]);
     setMentionQuery(null);
     if (inputRef.current) inputRef.current.style.height = 'auto';
@@ -740,6 +748,7 @@ function Composer({ disabled }: { disabled: boolean }) {
         placeholder="输入消息，Enter 发送，Shift+Enter 换行，可直接粘贴图片"
         onChange={(event) => {
           setValue(event.target.value);
+          imStore.setDraft(state.activeCid ?? '', event.target.value);
           if (event.target.value.trim() !== '') imStore.notifyTyping();
           // "@" opens the member picker inside group chats.
           const caret = event.target.selectionStart ?? event.target.value.length;
