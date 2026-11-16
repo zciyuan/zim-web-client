@@ -23,23 +23,38 @@ const useElapsed = (startedAt: number, active: boolean): number => {
 const clock = (total: number): string =>
   `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 
+/** Mounts one LiveKit video element inside a grid tile. */
+function VideoHost({ element }: { element: HTMLVideoElement }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !element) return;
+    element.className = 'h-full w-full object-cover';
+    host.replaceChildren(element);
+    void element.play().catch(() => undefined);
+    return () => {
+      host.replaceChildren();
+    };
+  }, [element]);
+  return <div ref={hostRef} className="h-full w-full" />;
+}
+
 /** Full-screen call sheet: incoming, outgoing and active states. */
 export function CallOverlay() {
   const state = useIm();
   const call = state.call;
-  const remoteRef = useRef<HTMLDivElement>(null);
   const localRef = useRef<HTMLDivElement>(null);
+  const [remoteTracks, setRemoteTracks] = useState<{ uid: string; element: HTMLVideoElement }[]>([]);
   const elapsed = useElapsed(call.startedAt, call.phase === 'active');
+  const video = call.media === 2;
+  const isGroup = call.targetType === 2;
+  const selfUid = String(state.me?.uid ?? '');
 
   useEffect(() => {
     if (call.phase !== 'active' && call.phase !== 'connecting') return;
     callSession.onTrack({
-      onRemoteVideo: (element) => {
-        const host = remoteRef.current;
-        if (host) {
-          host.replaceChildren(element);
-          void element.play().catch(() => undefined);
-        }
+      onRemoteTracks: (tracks) => {
+        setRemoteTracks([...tracks].map(([uid, element]) => ({ uid, element })));
       },
     });
     void callSession.localVideo().then((element) => {
@@ -52,7 +67,16 @@ export function CallOverlay() {
   }, [call.phase, call.room]);
 
   if (call.phase === 'idle') return null;
-  const video = call.media === 2;
+
+  // One tile per participant, local self first; peers without video show an avatar.
+  const tiles = isGroup
+    ? [
+      { uid: selfUid, element: null as HTMLVideoElement | null, self: true },
+      ...call.participants
+        .filter((uid) => uid !== selfUid)
+        .map((uid) => ({ uid, element: remoteTracks.find((item) => item.uid === uid)?.element ?? null, self: false })),
+    ]
+    : [];
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur">
@@ -67,8 +91,29 @@ export function CallOverlay() {
         </div>
 
         <div className="relative flex h-[300px] items-center justify-center bg-slate-950">
-          {video && call.phase === 'active' ? (
-            <div ref={remoteRef} className="h-full w-full" />
+          {video && call.phase === 'active' && isGroup ? (
+            <div className="grid h-full w-full grid-cols-2 gap-1 p-1">
+              {tiles.map((tile) => (
+                <div
+                  key={tile.uid}
+                  data-video-tile={tile.uid}
+                  className="relative flex items-center justify-center overflow-hidden rounded-xl border border-slate-800 bg-slate-900"
+                >
+                  {tile.element ? (
+                    <VideoHost element={tile.element} />
+                  ) : (
+                    <div className="flex flex-col items-center gap-2">
+                      <Avatar name={imStore.senderName(tile.uid)} seed={tile.uid} size={48} />
+                      <span className="text-[11px] text-slate-400">{imStore.senderName(tile.uid)}</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : video && call.phase === 'active' ? (
+            <div className="h-full w-full">
+              {remoteTracks[0] ? <VideoHost element={remoteTracks[0].element} /> : null}
+            </div>
           ) : (
             <div className="flex flex-col items-center gap-3">
               <Avatar name={call.peerName} seed={call.peerId} size={72} />
@@ -84,7 +129,7 @@ export function CallOverlay() {
               </p>
             </div>
           )}
-          {video && call.phase === 'active' ? (
+          {video && call.phase === 'active' && !isGroup ? (
             <div ref={localRef} className="absolute bottom-3 right-3 h-24 w-32 overflow-hidden rounded-xl border border-slate-700 bg-slate-800" />
           ) : null}
         </div>

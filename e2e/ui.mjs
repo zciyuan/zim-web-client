@@ -663,6 +663,42 @@ const main = async () => {
   );
   await alice.screenshot({ path: path.join(OUT, '20-group-call.png') });
 
+  step('group video call renders a participant grid');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '视频');
+    if (!button) throw new Error('group video button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'video caller should be outgoing');
+  assert.equal(await waitCallPhase(bob, ['incoming']), 'incoming', 'video callee should ring');
+  await bob.bringToFront();
+  await bob.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
+      .find((item) => item.textContent === '接听');
+    if (!button) throw new Error('video accept button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'video callee should join');
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'video caller should be active');
+  await alice.bringToFront();
+  await alice.waitForFunction(
+    () => document.querySelectorAll('[data-video-tile]').length >= 2,
+    { timeout: 20_000 },
+  );
+  await alice.screenshot({ path: path.join(OUT, '24-video-grid.png') });
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
+      .find((item) => item.textContent === '挂断');
+    if (!button) throw new Error('video hangup button missing');
+    button.click();
+  });
+  assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'video caller should hang up');
+  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'video callee sheet should close');
+
   step('quote reply carries the quoted snippet');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
