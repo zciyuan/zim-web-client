@@ -393,7 +393,7 @@ const main = async () => {
     button.click();
   });
   await alice.waitForSelector('[aria-label="聊天"] input', { timeout: 10_000 });
-  await setValue(alice, '[aria-label="聊天"] input', 'React 实时消息');
+  await setValue(alice, '[aria-label="搜索本会话消息"]', 'React 实时消息');
   await alice.evaluate(() => {
     const buttons = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .filter((item) => item.textContent === '搜索');
@@ -745,16 +745,25 @@ const main = async () => {
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
-  // Quote Bob's message (the first incoming bubble in the thread).
-  await alice.evaluate(() => {
-    const bubble = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
-      .find((node) => node.getAttribute('data-mine') === 'false');
-    const button = bubble && [...bubble.querySelectorAll('button')].find((item) => item.textContent === '引用');
+  // Quote the newest incoming bubble, then read the snippet the composer shows.
+  const quotedSnippet = await alice.evaluate(() => {
+    const bubbles = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.getAttribute('data-mine') === 'false');
+    const bubble = bubbles[bubbles.length - 1];
+    if (!bubble) throw new Error('no incoming bubble to quote');
+    const button = [...bubble.querySelectorAll('button')].find((item) => item.textContent === '引用');
     if (!button) throw new Error('quote button missing');
     button.click();
+    return '';
   });
   await alice.waitForSelector('[data-quote-preview]', { timeout: 10_000 });
-  await setValue(alice, 'textarea', '引用测试回复');
+  const quoteSnippet = await alice.evaluate(() => {
+    const text = document.querySelector('[data-quote-preview]')?.textContent ?? '';
+    return text.replace(/^引用[:：]\s*/, '').trim().slice(0, 8);
+  });
+  assert.ok(quoteSnippet, `quote preview is empty (${quotedSnippet})`);
+  const quoteText = `引用测试回复 ${Date.now() % 100000}`;
+  await setValue(alice, 'textarea', quoteText);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -762,9 +771,11 @@ const main = async () => {
     button.click();
   });
   await alice.waitForFunction(
-    () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
-      .some((node) => (node.textContent ?? '').includes('引用测试回复') && (node.textContent ?? '').includes('React 实时消息')),
+    (reply, snippet) => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes(reply) && (node.textContent ?? '').includes(snippet)),
     { timeout: 20_000 },
+    quoteText,
+    quotedSnippet,
   );
   await alice.screenshot({ path: path.join(OUT, '18-quote.png') });
 
@@ -883,6 +894,32 @@ const main = async () => {
     { timeout: 20_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '23-read.png') });
+
+  step('in-chat search and export work');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  // Open the in-chat search panel only when a previous step left it closed.
+  await alice.evaluate(() => {
+    if (!document.querySelector('[aria-label="搜索本会话消息"]')) {
+      document.querySelector('[aria-label="消息搜索"]')?.click();
+    }
+  });
+  await alice.waitForSelector('[aria-label="搜索本会话消息"]', { timeout: 10_000 });
+  await setValue(alice, '[aria-label="搜索本会话消息"]', 'React');
+  await alice.evaluate(() => {
+    const buttons = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .filter((item) => item.textContent === '搜索');
+    buttons[buttons.length - 1]?.click();
+  });
+  await alice.waitForSelector('[data-search-results] [data-search-result]', { timeout: 15_000 });
+  await alice.evaluate(() => document.querySelector('[data-search-result]')?.click());
+  await alice.waitForFunction(() => Boolean(window.__zim.getSnapshot().focusMessageId), { timeout: 15_000 });
+  await clickByText(alice, 'button', '导出');
+  await alice.waitForFunction(
+    () => (window.__zim.getSnapshot().toast?.text ?? '').includes('已导出'),
+    { timeout: 15_000 },
+  );
 
   step('right-click opens the message menu');
   await alice.bringToFront();

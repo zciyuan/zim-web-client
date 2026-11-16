@@ -1228,6 +1228,35 @@ class ImStore {
     return { conversations, messages };
   }
 
+  /** Exports the loaded thread as a plain-text transcript download. */
+  exportConversation(cid: string): void {
+    const conversation = this.conversation(cid);
+    const thread = this.state.threads[cid];
+    if (!conversation || !thread || thread.items.length === 0) {
+      this.notify('当前会话没有可导出的消息', 'error');
+      return;
+    }
+    const lines = thread.items.map((item) => {
+      const at = new Date(Number(item.send_time)).toLocaleString();
+      const who = String(item.send_id) === String(this.state.me?.uid ?? '')
+        ? this.senderName(item.send_id)
+        : this.senderName(item.send_id);
+      const body = messagePreview(item.content, item.msg_type);
+      return `[${at}] ${who}: ${body}`;
+    });
+    const header = `# ${this.conversationTitle(conversation)} (${cid})\n`;
+    const blob = new Blob([header + lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `zim-${cid}-${Date.now()}.txt`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    this.notify(`已导出 ${thread.items.length} 条消息`);
+  }
+
   /** Pins/unpins a conversation (server sorts pinned chats first). */
   async pinConversation(cid: string, pinned: boolean): Promise<void> {
     try {

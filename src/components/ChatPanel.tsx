@@ -686,6 +686,15 @@ export function ChatPanel() {
           ) : null}
           <button
             type="button"
+            aria-label="导出聊天记录"
+            onClick={() => conversation && imStore.exportConversation(conversation.conversation_id)}
+            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+          >
+            导出
+          </button>
+          <button
+            type="button"
+            aria-label="消息搜索"
             onClick={() => setSearchOpen((open) => !open)}
             className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
           >
@@ -731,6 +740,7 @@ export function ChatPanel() {
                 }
               }}
               placeholder="搜索本会话消息，回车执行"
+              aria-label="搜索本会话消息"
               className="flex-1 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs dark:border-slate-700 dark:bg-slate-800"
             />
             <button
@@ -749,7 +759,11 @@ export function ChatPanel() {
                 <button
                   key={item.server_msg_id || item.client_msg_id}
                   type="button"
-                  onClick={() => setSearchOpen(false)}
+                  data-search-result
+                  onClick={() => {
+                    setSearchOpen(false);
+                    if (item.server_msg_id) imStore.focusMessage(item.server_msg_id);
+                  }}
                   className="flex w-full items-baseline gap-2 rounded-lg px-2 py-1 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800/60"
                 >
                   <span className="shrink-0 text-slate-400">{formatClock(item.send_time)}</span>
