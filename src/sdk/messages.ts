@@ -24,6 +24,7 @@ export const OP = {
   MY_GROUPS: 1314,
   SEND_SINGLE: 1501,
   SEND_GROUP: 1502,
+  MERGE: 1503,
   QUOTE: 1504,
   READ_RECEIPT: 1505,
   RECALL: 1506,
@@ -308,7 +309,7 @@ export const encodeQuoteReq = (req: {
 }): Uint8Array => {
   const writer = new Writer().string(1, req.clientMsgId);
   if (req.recvId) writer.int64(2, Number(req.recvId));
-  if (req.groupId) writer.int64(3, Number(req.groupId));
+  if (req.groupId) writer.int64(3, req.groupId);
   return writer.string(4, req.serverMsgId).string(5, req.content).finish();
 };
 
@@ -411,4 +412,30 @@ export const decodeKickPush = (bytes: Uint8Array): { reason: number; other_platf
     else reader.skip(wire);
   });
   return res;
+};
+
+/** 1503 MergeMessage { client_msg_id=1; recv_id=2; group_id=3; repeated server_msg_ids=4; title=5; } */
+export const encodeMergeReq = (req: {
+  clientMsgId: string;
+  recvId?: string;
+  groupId?: string;
+  serverMsgIds: string[];
+  title?: string;
+}): Uint8Array => {
+  const writer = new Writer().string(1, req.clientMsgId);
+  if (req.recvId) writer.int64(2, Number(req.recvId));
+  if (req.groupId) writer.int64(3, req.groupId);
+  for (const id of req.serverMsgIds) writer.string(4, id);
+  return writer.string(5, req.title ?? '').finish();
+};
+
+export const decodeMergeRes = (bytes: Uint8Array): SendRes => {
+  const result: SendRes = { server_msg_id: '', seq: '0', send_time: '0', unread_count: '0' };
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) result.server_msg_id = reader.string();
+    else if (field === 2) result.seq = reader.int64();
+    else if (field === 3) result.send_time = reader.int64();
+    else reader.skip(wire);
+  });
+  return result;
 };

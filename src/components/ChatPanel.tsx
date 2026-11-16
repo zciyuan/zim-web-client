@@ -4,7 +4,7 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
-import { attachmentOf, formatBytes, formatDuration, quoteOf } from '../app/format';
+import { attachmentOf, formatBytes, formatDuration, mergeOf, quoteOf } from '../app/format';
 import { formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
@@ -15,17 +15,24 @@ function Bubble({
   showSender,
   senderName,
   onForward,
+  selectable,
+  selected,
+  onSelect,
 }: {
   message: UiMessage;
   mine: boolean;
   showSender: boolean;
   senderName: string;
   onForward?: (message: UiMessage) => void;
+  selectable?: boolean;
+  selected?: boolean;
+  onSelect?: () => void;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
   const { text, system } = messageText(message.content, message.msg_type);
   const quote = quoteOf(message.content);
+  const merge = mergeOf(message.content);
   const state = message.localState ?? 'sent';
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
@@ -166,11 +173,30 @@ function Bubble({
                   </button>
                 </span>
               </div>
+            ) : merge ? (
+              <details className="min-w-[200px]">
+                <summary className="cursor-pointer text-sm">
+                  📄 {merge.title} · {merge.items.length} 条
+                </summary>
+                <ol className="mt-1 max-h-40 space-y-0.5 overflow-y-auto text-[11px] opacity-80">
+                  {merge.items.map((item, index) => (
+                    <li key={item.server_msg_id || index} className="truncate">
+                      {index + 1}. {item.text}
+                    </li>
+                  ))}
+                </ol>
+              </details>
             ) : (
               message.status === 2 ? '该消息已删除' : text
             )}
           </div>
         )}
+        {selectable ? (
+          <label className={`mt-1 flex items-center gap-1 text-[11px] ${mine ? 'justify-end' : ''}`}>
+            <input type="checkbox" checked={Boolean(selected)} onChange={() => onSelect?.()} aria-label="选择消息" />
+            <span>选择</span>
+          </label>
+        ) : null}
         {state === 'failed' ? (
           <div className="mt-0.5 text-right text-[11px] text-rose-600">
             发送失败{' '}
@@ -387,6 +413,9 @@ export function ChatPanel() {
   const [results, setResults] = useState<UiMessage[] | null>(null);
   const [searching, setSearching] = useState(false);
   const [forwardTarget, setForwardTarget] = useState<UiMessage | null>(null);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [mergePending, setMergePending] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const conversation = useMemo(
@@ -470,6 +499,21 @@ export function ChatPanel() {
             className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
           >
             搜索
+          </button>
+          <button
+            type="button"
+            aria-label="多选消息"
+            onClick={() => {
+              setSelectMode((on) => !on);
+              setSelectedIds([]);
+            }}
+            className={`rounded-lg border px-2.5 py-1 text-xs transition ${
+              selectMode
+                ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-950'
+                : 'border-slate-200 text-slate-500 hover:border-indigo-400 dark:border-slate-700'
+            }`}
+          >
+            多选
           </button>
           {isGroup ? (
             <button
@@ -557,11 +601,44 @@ export function ChatPanel() {
                 showSender={Boolean(isGroup)}
                 senderName={imStore.senderName(message.send_id)}
                 onForward={setForwardTarget}
+                selectable={selectMode}
+                selected={selectedIds.includes(message.server_msg_id)}
+                onSelect={() => {
+                  const id = message.server_msg_id;
+                  if (!id) return;
+                  setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+                }}
               />
             );
           })}
         </div>
       </div>
+
+      {selectMode ? (
+        <div className="flex items-center justify-between border-t border-slate-200 bg-indigo-50/60 px-3 py-1.5 text-xs dark:border-slate-800 dark:bg-indigo-950/30">
+          <span>已选 {selectedIds.length} 条</span>
+          <span className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={selectedIds.length === 0}
+              onClick={() => setMergePending(true)}
+              className="rounded-lg bg-indigo-600 px-2.5 py-1 font-medium text-white disabled:opacity-40"
+            >
+              合并转发
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectMode(false);
+                setSelectedIds([]);
+              }}
+              className="rounded-lg border border-slate-200 px-2.5 py-1 dark:border-slate-700"
+            >
+              取消
+            </button>
+          </span>
+        </div>
+      ) : null}
 
       <Composer disabled={state.connection !== 'open'} />
 
@@ -572,12 +649,15 @@ export function ChatPanel() {
       />
 
       <dialog
-        open={Boolean(forwardTarget)}
-        onClose={() => setForwardTarget(null)}
+        open={Boolean(forwardTarget) || mergePending}
+        onClose={() => {
+          setForwardTarget(null);
+          setMergePending(false);
+        }}
         className="w-[min(420px,94vw)] rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
       >
         <header className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
-          <h3 className="text-sm font-semibold">转发到</h3>
+          <h3 className="text-sm font-semibold">{mergePending ? '合并转发到' : '转发到'}</h3>
           <button type="button" className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs dark:border-slate-700" onClick={() => setForwardTarget(null)}>
             关闭
           </button>
@@ -597,8 +677,17 @@ export function ChatPanel() {
                 className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-[13px] hover:bg-slate-50 dark:hover:bg-slate-800/60"
                 onClick={() => {
                   const target = forwardTarget;
+                  const pending = mergePending;
+                  const ids = selectedIds;
                   setForwardTarget(null);
-                  if (target) void imStore.forwardMessage(target, item.conversation_id);
+                  setMergePending(false);
+                  setSelectMode(false);
+                  setSelectedIds([]);
+                  if (pending) {
+                    void imStore.mergeForward(ids, item.conversation_id);
+                  } else if (target) {
+                    void imStore.forwardMessage(target, item.conversation_id);
+                  }
                 }}
               >
                 <Avatar name={title} seed={item.conversation_id} size={26} />

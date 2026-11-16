@@ -83,6 +83,25 @@ export const quoteOf = (raw: string): QuoteInfo | null => {
   };
 };
 
+/** Merged chat-record card (op:1503). */
+export interface MergeInfo {
+  title: string;
+  items: { server_msg_id: string; send_id: string; text: string }[];
+}
+
+/** Reads the merged card of a 1503 message, or null. */
+export const mergeOf = (raw: string): MergeInfo | null => {
+  const parsed = parseContent(raw);
+  const merge = parsed?.merge as Record<string, unknown> | undefined;
+  if (!merge || !Array.isArray(merge.items)) return null;
+  const items = (merge.items as Record<string, unknown>[]).map((item) => ({
+    server_msg_id: typeof item.server_msg_id === 'string' ? item.server_msg_id : '',
+    send_id: item.send_id === undefined ? '' : String(item.send_id),
+    text: typeof item.text === 'string' ? item.text : '',
+  }));
+  return { title: typeof merge.title === 'string' ? merge.title : '聊天记录', items };
+};
+
 /** Text to show inside a bubble. */
 export const messageText = (raw: string, msgType: number): { text: string; system: boolean } => {
   if (msgType >= 20 && msgType <= 22) {

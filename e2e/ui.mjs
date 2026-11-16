@@ -686,6 +686,58 @@ const main = async () => {
   );
   await alice.screenshot({ path: path.join(OUT, '19-forward.png') });
 
+  step('merge forward sends a chat-record card');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  await jsClick(alice, '[aria-label="多选消息"]');
+  await alice.waitForFunction(
+    () => document.querySelectorAll('[aria-label="选择消息"]').length > 0,
+    { timeout: 10_000 },
+  );
+  await alice.evaluate(() => {
+    const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.getAttribute('data-mine') === 'true');
+    for (const node of nodes.slice(-2)) {
+      const box = node.querySelector('input[aria-label="选择消息"]');
+      if (box) box.click();
+    }
+  });
+  await alice.waitForFunction(
+    () => (document.querySelector('[aria-label="聊天"]')?.textContent ?? '').includes('已选 2 条'),
+    { timeout: 10_000 },
+  );
+  await clickByText(alice, 'button', '合并转发');
+  await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
+  await alice.evaluate(() => {
+    const options = [...document.querySelectorAll('dialog[open] button')]
+      .filter((item) => item.textContent && item.textContent.trim() !== '关闭' && item.textContent.trim() !== '×');
+    const group = options.find((item) => (item.textContent ?? '').includes('E2E')) ?? options[0];
+    if (!group) throw new Error('no merge target');
+    group.click();
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const mergeDiag = await alice.evaluate(() => {
+    const state = window.__zim.getSnapshot();
+    const previews = (state.conversations ?? [])
+      .filter((item) => JSON.stringify(item).includes('聊天记录'))
+      .map((item) => item.conversation_id);
+    let card = null;
+    for (const [cid, thread] of Object.entries(state.threads ?? {})) {
+      const hit = (thread.items ?? []).find((item) => item.content.includes('"merge"'));
+      if (hit) {
+        card = { cid, text: hit.content.slice(0, 60) };
+        break;
+      }
+    }
+    return { toast: state.toast?.text, previews, card };
+  });
+  assert.ok(
+    mergeDiag.card !== null || mergeDiag.previews.length > 0 || (mergeDiag.toast ?? '').includes('已合并转发'),
+    `merge forward did not land: ${JSON.stringify(mergeDiag)}`,
+  );
+  await alice.screenshot({ path: path.join(OUT, '22-merge.png') });
+
   step('add friend over the WS channel (1201)');
   const wsSuffix = String(Date.now() % 1_000_000);
   const wsFriend = await fetch(`${BASE}/v1/auth/register`, {

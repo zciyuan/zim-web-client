@@ -14,6 +14,7 @@ import {
   OP,
   decodeMessageItem,
   decodeMyGroupsRes,
+  decodeMergeRes,
   decodeQuoteRes,
   decodeSearchMessageRes,
   decodeOperationRes,
@@ -24,6 +25,7 @@ import {
   encodeMyGroupsReq,
   encodeReactionReq,
   encodeRecallReq,
+  encodeMergeReq,
   encodeQuoteReq,
   encodeSearchMessageReq,
   encodeReadReceiptReq,
@@ -1328,6 +1330,37 @@ class ImStore {
     } catch (err) {
       this.updateMessage(conversation.conversation_id, clientMsgId, { localState: 'failed' });
       this.notify(`引用回复失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
+  /** 1503: forwards several messages as one chat-record card. */
+  async mergeForward(serverMsgIds: string[], targetCid: string): Promise<void> {
+    if (!this.client || serverMsgIds.length === 0) return;
+    // Derive ids from the conversation id: REST group ids lose precision.
+    const [kind, first, second] = targetCid.split('_');
+    const selfUid = String(this.state.me?.uid ?? '');
+    const groupId = kind === 'g' ? first : undefined;
+    const recvId = kind === 's' ? (first === selfUid ? second : first) : undefined;
+    if (!groupId && !recvId) {
+      this.notify('转发目标无效', 'error');
+      return;
+    }
+    try {
+      await this.client.request(
+        OP.MERGE,
+        encodeMergeReq({
+          clientMsgId: crypto.randomUUID(),
+          recvId,
+          groupId,
+          serverMsgIds,
+          title: '聊天记录',
+        }),
+        decodeMergeRes,
+      );
+      await this.refreshConversations();
+      this.notify(`已合并转发 ${serverMsgIds.length} 条消息`);
+    } catch (err) {
+      this.notify(`合并转发失败：${wrapError(err).display}`, 'error');
     }
   }
 
