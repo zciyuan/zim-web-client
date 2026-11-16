@@ -241,23 +241,38 @@ const main = async () => {
       if (!button) throw new Error('send button missing');
       button.click();
     });
-    replied = await alice.evaluate((needle) => {
-      const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
-        .filter((node) => node.getAttribute('data-mine') === 'true');
-      const last = nodes[nodes.length - 1];
-      return Boolean(last && last.textContent?.includes(needle) && last.getAttribute('data-state') === 'sent');
-    }, '收到，来自 React 客户端');
-    if (!replied) await new Promise((resolve) => setTimeout(resolve, 800));
+    // waitForFunction polls: an instantaneous check races the send round trip.
+    try {
+      await alice.waitForFunction(
+        (needle) => {
+          const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+            .filter((node) => node.getAttribute('data-mine') === 'true');
+          const last = nodes[nodes.length - 1];
+          return Boolean(last && last.textContent?.includes(needle) && last.getAttribute('data-state') === 'sent');
+        },
+        { timeout: 6000 },
+        '收到，来自 React 客户端',
+      );
+      replied = true;
+    } catch {
+      replied = false;
+    }
+    if (!replied) await new Promise((resolve) => setTimeout(resolve, 500));
   }
   assert.ok(replied, `alice reply never settled to sent: ${JSON.stringify(await alice.evaluate(() => {
     const state = window.__zim.getSnapshot();
     const thread = state.activeCid ? state.threads[state.activeCid] : null;
     const items = thread ? thread.items.slice(-3) : [];
+    const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.getAttribute('data-mine') === 'true');
+    const lastNode = nodes[nodes.length - 1];
     return {
       conn: state.connection,
       toast: state.toast?.text,
       active: state.activeCid,
       items: items.map((item) => ({ state: item.localState, text: item.content.slice(0, 40) })),
+      domCount: nodes.length,
+      lastDom: lastNode ? { state: lastNode.getAttribute('data-state'), text: (lastNode.textContent ?? '').slice(0, 60) } : null,
     };
   }))}`);
 
