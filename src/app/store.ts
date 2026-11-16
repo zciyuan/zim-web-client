@@ -271,6 +271,7 @@ class ImStore {
   private rest = new IMHttp({ baseUrl: initialState.endpoint });
   private client: IMClient | null = null;
   private seenPushes = new Set<string>();
+  private pollTimer: number | null = null;
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
@@ -486,6 +487,7 @@ class ImStore {
     await this.bootstrap();
     // Catch up on anything that changed while this client was offline.
     void this.runSync();
+    this.startPolling();
   }
 
   private persistSession(endpoint: string, username: string): void {
@@ -497,6 +499,7 @@ class ImStore {
   }
 
   logout(): void {
+    this.stopPolling();
     void this.client?.request(OP.LOGOUT, new Uint8Array(0), decodeOperationRes).catch(() => undefined);
     this.client?.close();
     this.client = null;
@@ -662,6 +665,39 @@ class ImStore {
     } catch (err) {
       if (import.meta.env.DEV) console.debug('[zim] friend ws failed, falling back to REST', err);
       return false;
+    }
+  }
+
+  /** Polls friend requests/friends so changes from other clients appear live. */
+  private startPolling(): void {
+    this.stopPolling();
+    this.pollTimer = window.setInterval(() => {
+      void this.pollRelations();
+    }, 20_000);
+  }
+
+  private stopPolling(): void {
+    if (this.pollTimer !== null) {
+      window.clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+  }
+
+  private async pollRelations(): Promise<void> {
+    if (this.state.status !== 'ready' || this.state.connection !== 'open') return;
+    try {
+      const [requests, friends] = await Promise.all([
+        this.rest.friendRequests('in'),
+        this.rest.friends(),
+      ]);
+      const before = this.state.friendRequests.length;
+      this.set({
+        friendRequests: requests as FriendRequestItem[],
+        friends: friends as Friend[],
+      });
+      if (requests.length > before) this.notify('收到新的好友申请');
+    } catch {
+      // offline or transient: the next tick retries
     }
   }
 

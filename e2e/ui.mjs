@@ -322,11 +322,8 @@ const main = async () => {
     }
   };
   alice.on('dialog', onDialog);
-  // Native prompt/confirm are auto-dismissed in headless Chrome before the CDP
-  // handler can answer, so stub them: the feature under test is the edit/delete
-  // round trip, not the browser dialog.
+  // Only the destructive confirms are native dialogs now; editing is inline.
   await alice.evaluate(() => {
-    window.prompt = () => '编辑后的消息';
     window.confirm = () => true;
   });
   const clickOwnAction = (label) => alice.evaluate((wanted) => {
@@ -340,7 +337,23 @@ const main = async () => {
 
   let edited = false;
   for (let attempt = 0; attempt < 4 && !edited; attempt += 1) {
+    if (attempt > 0) await alice.evaluate(() => window.__zim.setQuoteTarget(null));
     await clickOwnAction('编辑');
+    // Inline editor: fill the bubble's textarea and save.
+    try {
+      await alice.waitForSelector('[aria-label="编辑消息"]', { timeout: 4000 });
+      await setValue(alice, '[aria-label="编辑消息"]', '编辑后的消息');
+      await alice.evaluate(() => {
+        const nodes = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+          .filter((node) => node.getAttribute('data-mine') === 'true');
+        const last = nodes[nodes.length - 1];
+        const button = last && [...last.querySelectorAll('button')].find((item) => item.textContent === '保存');
+        if (!button) throw new Error('save button missing');
+        button.click();
+      });
+    } catch {
+      // editor did not open; retry
+    }
     edited = await alice.evaluate(() => (document.querySelector('[aria-label="聊天"]')?.textContent ?? '').includes('编辑后的消息'));
     if (!edited) await new Promise((resolve) => setTimeout(resolve, 700));
   }

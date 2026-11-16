@@ -29,15 +29,25 @@ function Bubble({
   const state = message.localState ?? 'sent';
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
 
   const openImage = () => {
     if (image) window.open(imStore.assetUrl(image.url), '_blank', 'noopener');
   };
 
+  // Inline editor: native window.prompt is unreliable in embedded/headless
+  // browsers and blocks the page, so editing happens inside the bubble.
   const startEdit = () => {
-    const next = window.prompt('编辑消息', text);
-    if (next !== null && next.trim() !== '') {
-      void imStore.editMessage(message, JSON.stringify({ text: next.trim() }));
+    setDraft(text);
+    setEditing(true);
+  };
+
+  const commitEdit = () => {
+    const next = draft.trim();
+    setEditing(false);
+    if (next !== '' && next !== text) {
+      void imStore.editMessage(message, JSON.stringify({ text: next }));
     }
   };
 
@@ -130,7 +140,35 @@ function Bubble({
               state === 'failed' ? 'border-rose-400 bg-transparent text-rose-600' : ''
             }`}
           >
-            {message.status === 2 ? '该消息已删除' : text}
+            {editing ? (
+              <div className="flex flex-col gap-1">
+                <textarea
+                  aria-label="编辑消息"
+                  autoFocus
+                  value={draft}
+                  rows={Math.min(4, Math.max(1, draft.split('\n').length))}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      commitEdit();
+                    }
+                    if (event.key === 'Escape') setEditing(false);
+                  }}
+                  className="min-w-[180px] resize-none rounded-lg border border-indigo-300 bg-white px-2 py-1 text-sm text-slate-900 outline-none dark:border-indigo-700 dark:bg-slate-900 dark:text-slate-100"
+                />
+                <span className="flex items-center justify-end gap-2 text-[11px]">
+                  <button type="button" className="underline" onClick={() => setEditing(false)}>
+                    取消
+                  </button>
+                  <button type="button" className="font-medium underline" onClick={commitEdit}>
+                    保存
+                  </button>
+                </span>
+              </div>
+            ) : (
+              message.status === 2 ? '该消息已删除' : text
+            )}
           </div>
         )}
         {state === 'failed' ? (

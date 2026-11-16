@@ -37,6 +37,7 @@ const CONNECTION_COLOR: Record<string, string> = {
 function Rail() {
   const state = useIm();
   const total = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
+  const pending = state.friendRequests.length;
   const dot = CONNECTION_COLOR[state.connection] ?? 'bg-slate-400';
 
   return (
@@ -65,6 +66,14 @@ function Rail() {
               {tab.key === 'conversations' && total > 0 ? (
                 <span className="absolute top-1 right-2 min-w-4 rounded-full bg-rose-500 px-1 text-[10px] leading-4 text-white">
                   {total > 99 ? '99+' : total}
+                </span>
+              ) : null}
+              {tab.key === 'friends' && pending > 0 ? (
+                <span
+                  data-friend-requests
+                  className="absolute top-1 right-2 min-w-4 rounded-full bg-amber-500 px-1 text-[10px] leading-4 text-white"
+                >
+                  {pending > 99 ? '99+' : pending}
                 </span>
               ) : null}
             </button>
