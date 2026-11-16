@@ -589,6 +589,13 @@ class ImStore {
 
   // --------------------------------------------------------------- threads --
 
+  /** Drops one cached thread and loads it again (pull-to-refresh). */
+  async reloadThread(cid: string): Promise<void> {
+    if (!cid) return;
+    this.set({ threads: { ...this.state.threads, [cid]: emptyThread() } });
+    await this.openConversation(cid);
+  }
+
   async openConversation(cid: string): Promise<void> {
     this.set({ activeCid: cid, tab: this.state.tab === 'friends' || this.state.tab === 'groups' ? 'conversations' : this.state.tab });
     const conversation = this.conversation(cid);
@@ -1856,7 +1863,18 @@ class ImStore {
     const callId = crypto.randomUUID();
     const isGroup = conversation.type === 2;
     const targetType: 1 | 2 = isGroup ? 2 : 1;
-    const peerId = String(isGroup ? conversation.group_id : conversation.peer_id);
+    // Derive the target from the conversation id: REST group ids are JSON
+    // numbers and lose 64-bit precision in the browser.
+    const cidParts = conversation.conversation_id.split('_');
+    const peerId = String(
+      isGroup
+        ? (conversation.conversation_id.startsWith('g_') ? conversation.conversation_id.slice(2) : conversation.group_id)
+        : conversation.peer_id,
+    );
+    if (isGroup && cidParts.length < 2) {
+      this.notify('群会话标识无效', 'error');
+      return;
+    }
     const peer = isGroup ? this.groupName(peerId) : this.friendProfile(peerId);
     this.set({
       call: {

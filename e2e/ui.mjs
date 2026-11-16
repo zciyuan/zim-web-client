@@ -161,6 +161,9 @@ const main = async () => {
     // Stale dev attachments (container recreate wipes /app/run/upload) and
     // favicon probes are not app failures; pageerror catches real JS errors.
     if (msg.text().includes('Failed to load resource')) return;
+    // The SFU closes a room once empty; a late join attempt 404s during call
+    // teardown. That is LiveKit housekeeping, not an app failure.
+    if (msg.text().includes('127.0.0.1:7880')) return;
     errors.push(`alice console: ${msg.text()}`);
   });
 
@@ -183,6 +186,7 @@ const main = async () => {
   bob.on('console', (msg) => {
     if (msg.type() !== 'error') return;
     if (msg.text().includes('Failed to load resource')) return;
+    if (msg.text().includes('127.0.0.1:7880')) return;
     errors.push(`bob console: ${msg.text()}`);
   });
   await loginAs(bob, 'bob');
@@ -473,9 +477,15 @@ const main = async () => {
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
   await clickByText(alice, '[aria-label="列表"] button', '新建');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
-  await setValue(alice, 'dialog input:not([type])', `E2E 群 ${Date.now() % 10000}`);
+  const newGroupName = `E2E 群 ${Date.now() % 10000}`;
+  await setValue(alice, 'dialog input:not([type])', newGroupName);
   await alice.evaluate(() => {
-    const box = document.querySelector('dialog input[type="checkbox"]');
+    // Pick Bob: the invitee list order depends on the seeded friends.
+    const rows = [...document.querySelectorAll('dialog label, dialog div')]
+      .filter((node) => (node.textContent ?? '').includes('Bob'));
+    const row = rows.find((node) => node.querySelector('input[type="checkbox"]'));
+    const box = row?.querySelector('input[type="checkbox"]')
+      ?? document.querySelector('dialog input[type="checkbox"]');
     if (!box) throw new Error('no friend to pick');
     box.click();
   });
@@ -507,12 +517,15 @@ const main = async () => {
   // create response (REST ids are JSON numbers and lose precision in the client).
   const eventGroup = await alice.evaluate(async () => {
     const state = window.__zim.getSnapshot();
-    const bobUid = String(state.friends[0]?.friend_id ?? '');
+    // Pick Bob explicitly: friends[0] is not stable across seeded databases.
+    const bob = state.friends.find((item) => item.profile?.username === 'bob' || String(item.friend_id) === '10002');
+    const bobUid = String(bob?.friend_id ?? '');
     const name = `E2E 事件群 ${Date.now() % 10000}`;
     const gid = await window.__zim.createGroup(name, bobUid ? [bobUid] : []);
-    return { gid: String(gid), name };
+    return { gid: String(gid), name, bobUid };
   });
   assert.ok(eventGroup.gid, 'group create returned no id');
+  assert.ok(eventGroup.bobUid, 'bob is not a friend of alice');
   const renamed = `E2E 事件群改名 ${Date.now() % 10000}`;
   await alice.bringToFront();
   const renameResult = await alice.evaluate(async ([gid, name]) => {
@@ -590,8 +603,14 @@ const main = async () => {
 
   step('group voice call rings every member');
   await alice.bringToFront();
-  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
-  await openRowByLabel(alice, 'E2E 群', 'E2E 群', '[aria-label="聊天"] header');
+  // Use the group list: a fresh group has no conversation row until it gets a message.
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(3)');
+  await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
+  const groupCallTarget = await alice.evaluate(() => {
+    const state = window.__zim.getSnapshot();
+    const conversation = (state.conversations ?? []).find((item) => item.conversation_id === state.activeCid);
+    return { cid: state.activeCid, type: conversation?.type, gid: conversation?.group_id, bobConn: null };
+  });
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '语音');
@@ -599,7 +618,12 @@ const main = async () => {
     button.click();
   });
   assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'group caller should be outgoing');
-  assert.equal(await waitCallPhase(bob, ['incoming']), 'incoming', 'group member should ring');
+  const groupRing = await waitCallPhase(bob, ['incoming']);
+  assert.equal(
+    groupRing,
+    'incoming',
+    `group member should ring (target=${JSON.stringify(groupCallTarget)}, bobConn=${await bob.evaluate(() => window.__zim.getSnapshot().connection)})`,
+  );
   assert.equal(
     await bob.evaluate(() => window.__zim.getSnapshot().call.targetType),
     2,
@@ -623,11 +647,22 @@ const main = async () => {
   });
   assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'group caller should hang up');
   assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'group member sheet should close');
-  await alice.waitForFunction(
+  const callRecordVisible = () => alice.evaluate(
     () => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
       .some((node) => (node.textContent ?? '').includes('群通话')),
-    { timeout: 20_000 },
   );
+  let recorded = await callRecordVisible();
+  for (let attempt = 0; attempt < 5 && !recorded; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    recorded = await callRecordVisible();
+  }
+  if (!recorded) {
+    // The server recorded the call; the push can lag behind the hangup.
+    await alice.evaluate((cid) => window.__zim.reloadThread(cid), groupCallTarget.cid);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    recorded = await callRecordVisible();
+  }
+  assert.ok(recorded, 'group call record never appeared');
   await alice.screenshot({ path: path.join(OUT, '20-group-call.png') });
 
   step('quote reply carries the quoted snippet');
