@@ -987,6 +987,83 @@ const main = async () => {
     { timeout: 20_000 },
   );
 
+  step('long text collapses and expands');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  const longText = `长文本测试 ${'内容'.repeat(260)}${Date.now() % 10000}`;
+  await setValue(alice, 'textarea', longText);
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    button?.click();
+  });
+  await alice.waitForSelector('[data-expand-message]', { timeout: 20_000 });
+  const clampedBefore = await alice.evaluate(() => {
+    const node = document.querySelector('[data-expand-message]')?.previousElementSibling;
+    return Boolean(node?.className.includes('line-clamp-6'));
+  });
+  assert.ok(clampedBefore, 'long text should start collapsed');
+  await jsClick(alice, '[data-expand-message]');
+  await alice.waitForFunction(
+    () => {
+      const node = document.querySelector('[data-expand-message]')?.previousElementSibling;
+      return node ? !node.className.includes('line-clamp-6') : false;
+    },
+    { timeout: 10_000 },
+  );
+
+  step('jump-to-latest button appears when scrolled up');
+  await alice.evaluate(() => {
+    const list = document.querySelector('[aria-label="聊天"] .overflow-y-auto');
+    if (list) list.scrollTop = 0;
+  });
+  await alice.waitForSelector('[data-jump-latest]', { timeout: 10_000 });
+  await jsClick(alice, '[data-jump-latest]');
+  await alice.waitForFunction(
+    () => document.querySelector('[data-jump-latest]') === null,
+    { timeout: 10_000 },
+  );
+
+  step('profile dialog updates the nickname');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="个人资料"]');
+  await alice.waitForSelector('dialog[aria-label="个人资料"]', { timeout: 10_000 });
+  const newNickname = `Alice ${Date.now() % 1000}`;
+  await setValue(alice, 'dialog[aria-label="个人资料"] input[aria-label="昵称"]', newNickname);
+  await clickByText(alice, 'dialog[aria-label="个人资料"] button', '保存');
+  await alice.waitForFunction(
+    (nick) => window.__zim.getSnapshot().me?.name === nick,
+    { timeout: 15_000 },
+    newNickname,
+  );
+
+  step('search history is remembered');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="消息搜索"]');
+  await alice.waitForSelector('[aria-label="搜索本会话消息"]', { timeout: 10_000 });
+  await setValue(alice, '[aria-label="搜索本会话消息"]', '引用');
+  await alice.evaluate(() => {
+    const buttons = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .filter((item) => item.textContent === '搜索');
+    buttons[buttons.length - 1]?.click();
+  });
+  await alice.waitForSelector('[data-search-results]', { timeout: 15_000 });
+  await setValue(alice, '[aria-label="搜索本会话消息"]', '');
+  await alice.waitForSelector('[data-search-history-item]', { timeout: 10_000 });
+
+  step('Alt+ArrowDown walks the conversation list');
+  await alice.bringToFront();
+  const beforeShortcut = await alice.evaluate(() => window.__zim.getSnapshot().activeCid);
+  await alice.keyboard.down('Alt');
+  await alice.keyboard.press('ArrowDown');
+  await alice.keyboard.up('Alt');
+  await alice.waitForFunction(
+    (before) => window.__zim.getSnapshot().activeCid !== before,
+    { timeout: 15_000 },
+    beforeShortcut,
+  );
+
   step('links and emails become clickable');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');

@@ -127,6 +127,7 @@ function Bubble({
   const atMe = !mine && mentionsUser(message.content, String(imStore.me?.uid ?? ''), imStore.me?.name, atUids);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const [expanded, setExpanded] = useState(false);
 
   // The context menu's 「编辑」 opens this bubble's inline editor.
   useEffect(() => {
@@ -335,7 +336,23 @@ function Bubble({
             ) : (
               message.status === 2
                 ? '该消息已删除'
-                : <MentionText text={text} highlight={highlight} />
+                : (
+                  <>
+                    <span className={!expanded && text.length > 400 ? 'line-clamp-6' : ''}>
+                      <MentionText text={text} highlight={highlight} />
+                    </span>
+                    {text.length > 400 ? (
+                      <button
+                        type="button"
+                        data-expand-message
+                        onClick={() => setExpanded((current) => !current)}
+                        className="mt-1 block text-[11px] text-indigo-600 underline dark:text-indigo-400"
+                      >
+                        {expanded ? '收起' : '展开全文'}
+                      </button>
+                    ) : null}
+                  </>
+                )
             )}
           </div>
         )}
@@ -819,6 +836,7 @@ export function ChatPanel() {
 
   const runSearch = async () => {
     if (!conversation || !keyword.trim()) return;
+    imStore.rememberSearch(keyword);
     setSearching(true);
     try {
       setResults(await imStore.searchMessages(conversation.conversation_id, keyword.trim()));
@@ -830,9 +848,13 @@ export function ChatPanel() {
     }
   };
 
+  // Only auto-scroll when the reader is already at the bottom, so history
+  // browsing is not interrupted by incoming messages.
+  const atBottomRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
   useEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
   }, [state.activeCid, thread?.items.length]);
 
   if (!conversation) {
@@ -853,7 +875,7 @@ export function ChatPanel() {
 
   return (
     <section
-      className="flex min-w-0 flex-1 flex-col bg-slate-100 dark:bg-slate-950"
+      className="relative flex min-w-0 flex-1 flex-col bg-slate-100 dark:bg-slate-950"
       aria-label="聊天"
       style={swipeX > 0 ? { transform: `translateX(${swipeX}px)`, transition: 'transform 120ms ease-out' } : undefined}
       onTouchStart={(event) => {
@@ -1001,6 +1023,28 @@ export function ChatPanel() {
               {searching ? '搜索中…' : '搜索'}
             </button>
           </div>
+          {keyword.trim() === '' && state.searchHistory.length > 0 ? (
+            <div data-search-history className="mt-1.5 flex flex-wrap gap-1">
+              {state.searchHistory.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  data-search-history-item={item}
+                  onClick={() => {
+                    setKeyword(item);
+                    void imStore
+                      .searchMessages(conversation?.conversation_id ?? '', item)
+                      .then(setResults)
+                      .catch(() => setResults([]));
+                    imStore.rememberSearch(item);
+                  }}
+                  className="rounded-full border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:border-indigo-400 dark:border-slate-700"
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {results !== null ? (
             <div className="mt-2 max-h-[180px] overflow-y-auto" data-search-results>
               {results.length === 0 ? <p className="py-3 text-center text-xs text-slate-500">没有匹配的消息</p> : null}
@@ -1029,6 +1073,15 @@ export function ChatPanel() {
 
       <div
         ref={scrollRef}
+        onScroll={(event) => {
+          const el = event.currentTarget;
+          const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+          const near = distance < 80;
+          if (near !== atBottomRef.current) {
+            atBottomRef.current = near;
+            setAtBottom(near);
+          }
+        }}
         className="relative flex flex-1 flex-col overflow-y-auto px-4 py-4"
       >
         {groupNotice ? (
@@ -1129,6 +1182,21 @@ export function ChatPanel() {
           ) : null}
         </div>
       </div>
+
+      {!atBottom ? (
+        <button
+          type="button"
+          data-jump-latest
+          aria-label="回到底部"
+          onClick={() => {
+            const el = scrollRef.current;
+            if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+          }}
+          className="absolute bottom-24 right-6 z-10 rounded-full bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white shadow-lg transition hover:bg-indigo-500"
+        >
+          ↓ 回到底部
+        </button>
+      ) : null}
 
       {selectMode ? (
         <div className="flex items-center justify-between border-t border-slate-200 bg-indigo-50/60 px-3 py-1.5 text-xs dark:border-slate-800 dark:bg-indigo-950/30">
@@ -1301,6 +1369,25 @@ export function ChatPanel() {
             >
               转发
             </button>
+            <div
+              data-menu-action="react"
+              className="flex items-center justify-between gap-1 border-t border-slate-100 px-2 py-1 dark:border-slate-800"
+            >
+              {REACTION_EMOJIS.map((emoji) => (
+                <button
+                  key={emoji}
+                  type="button"
+                  aria-label={`回应 ${emoji}`}
+                  className="text-base transition hover:scale-110"
+                  onClick={() => {
+                    void imStore.toggleReaction(contextMenu.message, emoji);
+                    setContextMenu(null);
+                  }}
+                >
+                  {emoji}
+                </button>
+              ))}
+            </div>
             {contextMenu.message.msg_type === 1
               && String(contextMenu.message.send_id) === String(state.me?.uid ?? '')
               && contextMenu.message.server_msg_id ? (

@@ -34,6 +34,8 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
   const [applies, setApplies] = useState<GroupApply[]>([]);
   const [inviteUids, setInviteUids] = useState('');
   const [memberQuery, setMemberQuery] = useState('');
+  const [memberOffset, setMemberOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [name, setName] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState('');
@@ -52,6 +54,7 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
       setName(info?.name ?? '');
       setNotice(info?.notification ?? '');
       setMembers(list);
+      setMemberOffset(list.length);
     } catch (err) {
       setError(errorText(err));
     }
@@ -238,6 +241,27 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
             {filteredMembers?.map(memberRow)}
             {filteredMembers && filteredMembers.length === 0 && (members?.length ?? 0) > 0 ? (
               <p className="py-6 text-center text-xs text-slate-500">没有匹配的成员</p>
+            ) : null}
+            {(members?.length ?? 0) >= memberOffset && memberOffset > 0 && memberOffset % 200 === 0 ? (
+              <button
+                type="button"
+                data-load-more-members
+                disabled={loadingMore}
+                onClick={() => {
+                  setLoadingMore(true);
+                  void imStore
+                    .groupMembers(gid, memberOffset, 200)
+                    .then((page) => {
+                      setMembers((current) => [...(current ?? []), ...page]);
+                      setMemberOffset((current) => current + page.length);
+                    })
+                    .catch((err) => setError(errorText(err)))
+                    .finally(() => setLoadingMore(false));
+                }}
+                className="mx-auto mt-2 rounded-lg border border-slate-200 px-3 py-1 text-xs text-slate-500 hover:border-indigo-400 dark:border-slate-700"
+              >
+                {loadingMore ? '加载中…' : '加载更多成员'}
+              </button>
             ) : null}
             {members && members.length === 0 ? <p className="py-6 text-center text-xs text-slate-500">没有成员</p> : null}
           </div>

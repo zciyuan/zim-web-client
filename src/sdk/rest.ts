@@ -209,6 +209,11 @@ export class IMHttp {
 
   // ----------------------------------------------------------------- users --
 
+  /** PUT /v1/users/me — update nickname / avatar / gender. */
+  updateMe(patch: { nickname?: string; avatar?: string; gender?: number }): Promise<UserProfile> {
+    return this.send<UserProfile>('PUT', '/v1/users/me', { body: patch });
+  }
+
   me(): Promise<UserProfile> {
     return this.send<UserProfile>('GET', '/v1/users/me');
   }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { Avatar } from './Avatar';
 import { ChatPanel } from './ChatPanel';
+import { ProfileDialog } from './ProfileDialog';
 import { AddFriendDialog } from './AddFriendDialog';
 import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
@@ -37,15 +38,22 @@ const CONNECTION_COLOR: Record<string, string> = {
 
 function Rail() {
   const state = useIm();
+  const [profileOpen, setProfileOpen] = useState(false);
   const total = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
   const pending = state.friendRequests.length;
   const dot = CONNECTION_COLOR[state.connection] ?? 'bg-slate-400';
 
   return (
     <aside className="flex w-[76px] shrink-0 flex-col items-center gap-2 border-r border-slate-200 bg-slate-50 px-2 py-3.5 dark:border-slate-800 dark:bg-slate-900">
-      <div className="mb-1.5 grid h-10 w-10 place-items-center rounded-xl bg-linear-to-br from-indigo-500 to-violet-500 font-bold text-white">
-        Z
-      </div>
+      <button
+        type="button"
+        aria-label="个人资料"
+        onClick={() => setProfileOpen(true)}
+        className="mb-1.5 grid h-10 w-10 place-items-center rounded-xl bg-linear-to-br from-indigo-500 to-violet-500 font-bold text-white"
+      >
+        {String(state.me?.name ?? 'Z').slice(0, 1).toUpperCase()}
+      </button>
+      <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />
 
       <nav className="flex w-full flex-col gap-1" aria-label="主导航">
         {TABS.map((tab) => {
@@ -136,6 +144,19 @@ function EmptyList({ text }: { text: string }) {
   return <div className="px-4 py-10 text-center text-sm text-slate-500">{text}</div>;
 }
 
+/** Shared conversation ordering: pinned, then unread (optional), then newest. */
+function sortConversations<T extends { is_pinned?: number; unread?: number; last_msg_at?: number }>(list: T[], unreadFirst: boolean): T[] {
+  return [...list].sort((a, b) => {
+    const pinDiff = Number(b.is_pinned ?? 0) - Number(a.is_pinned ?? 0);
+    if (pinDiff !== 0) return pinDiff;
+    if (unreadFirst) {
+      const unreadDiff = (Number(b.unread ?? 0) > 0 ? 1 : 0) - (Number(a.unread ?? 0) > 0 ? 1 : 0);
+      if (unreadDiff !== 0) return unreadDiff;
+    }
+    return Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0);
+  });
+}
+
 function Sidebar() {
   const state = useIm();
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
@@ -189,15 +210,25 @@ function Sidebar() {
     });
   };
 
-  const conversationRows = [...state.conversations].sort((a, b) => {
-    const pinDiff = Number(b.is_pinned ?? 0) - Number(a.is_pinned ?? 0);
-    if (pinDiff !== 0) return pinDiff;
-    if (unreadFirst) {
-      const unreadDiff = (Number(b.unread ?? 0) > 0 ? 1 : 0) - (Number(a.unread ?? 0) > 0 ? 1 : 0);
-      if (unreadDiff !== 0) return unreadDiff;
-    }
-    return Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0);
-  });
+  const conversationRows = sortConversations(state.conversations, unreadFirst);
+
+  // Alt+↑/↓ walks the conversation list (desktop keyboard shortcut).
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (!event.altKey || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return;
+      event.preventDefault();
+      const ids = sortConversations(state.conversations, unreadFirst).map((item) => item.conversation_id);
+      if (ids.length === 0) return;
+      const current = state.activeCid ? ids.indexOf(state.activeCid) : -1;
+      const index = event.key === 'ArrowDown'
+        ? Math.min(ids.length - 1, current + 1)
+        : Math.max(0, current <= 0 ? 0 : current - 1);
+      const next = ids[index];
+      if (next && next !== state.activeCid) void imStore.openConversation(next);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [state.conversations, state.activeCid, unreadFirst]);
   const selfUid = String(state.me?.uid ?? '');
   const selfName = String(state.me?.name ?? '');
   const unreadTotal = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
@@ -374,6 +405,21 @@ function Sidebar() {
             aria-label="全局搜索输入"
             className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs outline-none focus:border-indigo-400 dark:border-slate-700 dark:bg-slate-800"
           />
+          {keyword.trim() === '' && state.searchHistory.length > 0 ? (
+            <div data-search-history className="mt-1.5 flex flex-wrap gap-1">
+              {state.searchHistory.map((item) => (
+                <button
+                  key={item}
+                  type="button"
+                  data-search-history-item={item}
+                  onClick={() => setKeyword(item)}
+                  className="rounded-full border border-slate-200 px-2 py-0.5 text-[11px] text-slate-500 hover:border-indigo-400 dark:border-slate-700"
+                >
+                  {item}
+                </button>
+              ))}
+            </div>
+          ) : null}
           {keyword.trim() ? (
             <div className="mt-1.5 max-h-72 overflow-y-auto rounded-lg border border-slate-200 bg-white text-xs dark:border-slate-700 dark:bg-slate-900">
               {results.conversations.length === 0 && results.messages.length === 0 ? (
@@ -488,6 +534,19 @@ function Sidebar() {
                     }`}
                   >
                     ＠我优先
+                  </button>
+                  <button
+                    type="button"
+                    aria-label="全部＠我标为已读"
+                    data-mark-at-me-read
+                    onClick={() => {
+                      for (const item of state.conversations) {
+                        if (Number(item.unread ?? 0) > 0 && rowMentionsMe(item)) void imStore.markRead(item.conversation_id);
+                      }
+                    }}
+                    className="rounded-lg border border-rose-200 px-2 py-0.5 text-[11px] text-rose-600 hover:border-rose-400 dark:border-rose-900 dark:text-rose-300"
+                  >
+                    清＠我
                   </button>
                   <button
                     type="button"
@@ -813,11 +872,38 @@ export function Workspace() {
     document.title = unread > 0 ? `(${unread > 99 ? '99+' : unread}) ZIM` : 'ZIM';
   }, [unread]);
 
+  const disconnected = state.connection === 'closed' || state.connection === 'offline' || state.connection === 'error';
+  const reconnecting = state.connection === 'connecting' || state.connection === 'reconnecting';
+
   return (
-    <div className="flex h-full bg-slate-100 dark:bg-slate-950">
-      <Rail />
-      <Sidebar />
-      <ChatPanel />
+    <div className="flex h-full flex-col bg-slate-100 dark:bg-slate-950">
+      {disconnected || reconnecting ? (
+        <div
+          data-connection-banner={state.connection}
+          className={`flex items-center justify-center gap-2 px-3 py-1 text-xs ${
+            disconnected
+              ? 'bg-rose-500 text-white'
+              : 'bg-amber-400 text-amber-950'
+          }`}
+        >
+          <span>{disconnected ? '连接已断开，消息可能延迟' : '正在重新连接…'}</span>
+          <button
+            type="button"
+            data-retry-connection
+            onClick={() => void imStore.retryConnection()}
+            className={`rounded border px-2 py-0.5 text-[11px] ${
+              disconnected ? 'border-white/60 hover:bg-white/10' : 'border-amber-900/40 hover:bg-amber-900/10'
+            }`}
+          >
+            立即重试
+          </button>
+        </div>
+      ) : null}
+      <div className="flex min-h-0 flex-1">
+        <Rail />
+        <Sidebar />
+        <ChatPanel />
+      </div>
     </div>
   );
 }

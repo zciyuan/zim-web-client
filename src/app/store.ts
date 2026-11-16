@@ -9,7 +9,7 @@ import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
-import { measureImage, measureMedia } from './image';
+import { compressImage, measureImage, measureMedia } from './image';
 import {
   OP,
   decodeMessageItem,
@@ -153,6 +153,8 @@ export interface ImState {
   uploadRetries: string[];
   /** keyword highlighted inside the focused message (search jumps) */
   searchHighlight: string;
+  /** most recent search keywords (newest first) */
+  searchHistory: string[];
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -195,6 +197,7 @@ const initialState: ImState = {
   focusMessageId: null,
   uploadRetries: [],
   searchHighlight: '',
+  searchHistory: [],
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -322,6 +325,7 @@ class ImStore {
 
   constructor() {
     this.applyTheme();
+    this.loadSearchHistory();
     // "system" keeps following the OS while the app runs.
     if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
       window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -444,6 +448,19 @@ class ImStore {
   }
 
   /** Re-reads the list snapshots after a reconnect or a manual refresh. */
+  /** Manual retry after a dropped connection: reopen the socket and refresh. */
+  async retryConnection(): Promise<void> {
+    if (this.state.connection === 'open' || this.state.connection === 'connecting' || this.state.connection === 'reconnecting') {
+      await this.refresh();
+      return;
+    }
+    this.client?.close();
+    this.client = null;
+    this.restorePromise = null;
+    await this.restore();
+    if ((this.state.connection as string) === 'open') this.notify('已重新连接');
+  }
+
   async refresh(): Promise<void> {
     try {
       await this.bootstrap();
@@ -707,11 +724,11 @@ class ImStore {
 
   /** Group members, with nicknames resolved through the batch profile endpoint. */
   /** Group members with roles (WS 1310) and nicknames (REST batch profiles). */
-  async groupMembers(gid: string): Promise<GroupMember[]> {
+  async groupMembers(gid: string, offset = 0, limit = 200): Promise<GroupMember[]> {
     if (!this.client) throw new ImError(0, '连接未就绪');
     const res = await this.client.request(
       GROUP_OP.MEMBERS,
-      encodeGroupMembersReq({ groupId: gid, limit: 200 }),
+      encodeGroupMembersReq({ groupId: gid, offset, limit }),
       decodeGroupMembersRes,
     );
     const rows: GroupMemberInfo[] = res.payload;
@@ -1273,6 +1290,56 @@ class ImStore {
     this.notify(`已导出 ${thread.items.length} 条消息`);
   }
 
+  /** Remembers a search keyword (max 8, newest first, persisted). */
+  rememberSearch(keyword: string): void {
+    const value = keyword.trim();
+    if (!value) return;
+    const next = [value, ...this.state.searchHistory.filter((item) => item !== value)].slice(0, 8);
+    this.set({ searchHistory: next });
+    try {
+      localStorage.setItem('zim.searchHistory', JSON.stringify(next));
+    } catch {
+      // private mode: keep it in memory only
+    }
+  }
+
+  /** Loads the persisted search history once at startup. */
+  private loadSearchHistory(): void {
+    try {
+      const raw = localStorage.getItem('zim.searchHistory');
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        this.set({ searchHistory: parsed.filter((item) => typeof item === 'string').slice(0, 8) });
+      }
+    } catch {
+      // corrupt entry: ignore
+    }
+  }
+
+  /** Updates the signed-in user's nickname / avatar. */
+  async updateProfile(patch: { nickname?: string; avatar?: string }): Promise<void> {
+    const nickname = patch.nickname?.trim();
+    const avatar = patch.avatar?.trim();
+    if (nickname !== undefined && !nickname) {
+      this.notify('昵称不能为空', 'error');
+      return;
+    }
+    try {
+      const profile = await this.rest.updateMe({ nickname, avatar });
+      this.set({
+        me: {
+          uid: profile.uid,
+          name: profile.nickname || nickname || this.state.me?.name || profile.uid,
+          avatar: profile.avatar ?? avatar ?? this.state.me?.avatar ?? '',
+        },
+      });
+      this.notify('资料已更新');
+    } catch (err) {
+      this.notify(`更新失败：${wrapError(err).display}`, 'error');
+    }
+  }
+
   /** Pins/unpins a conversation (server sorts pinned chats first). */
   async pinConversation(cid: string, pinned: boolean): Promise<void> {
     try {
@@ -1423,21 +1490,25 @@ class ImStore {
       return;
     }
 
+    // Large photos are downscaled first: faster uploads and smaller history.
+    const compressed = await compressImage(file);
+    const payload = compressed.file;
+
     const started = this.appendDraft(
       2,
-      JSON.stringify({ uploading: true, name: file.name, size: file.size }),
+      JSON.stringify({ uploading: true, name: payload.name, size: payload.size }),
       { progress: 0 },
     );
     if (!started) return;
     const { draft } = started;
     const cid = started.conversation.conversation_id;
-    this.trackUpload(draft.client_msg_id, file, 2);
+    this.trackUpload(draft.client_msg_id, payload, 2);
     try {
-      const dimensions = await measureImage(file);
+      const dimensions = await measureImage(payload);
       const uploaded = await this.rest.uploadFile({
-        blob: file,
-        name: file.name || 'image.png',
-        mime: file.type || 'image/png',
+        blob: payload,
+        name: payload.name || 'image.png',
+        mime: payload.type || 'image/png',
         onProgress: (percent) => this.updateMessage(cid, draft.client_msg_id, { progress: percent }),
       });
       const content = JSON.stringify({
@@ -1445,7 +1516,7 @@ class ImStore {
         width: dimensions.width,
         height: dimensions.height,
         size: uploaded.size,
-        name: file.name,
+        name: payload.name,
       });
       this.updateMessage(cid, draft.client_msg_id, { content, progress: undefined });
       await this.deliver({ ...draft, content }, started.conversation);
