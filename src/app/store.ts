@@ -157,6 +157,8 @@ export interface ImState {
   searchHistory: string[];
   /** unsent text per conversation (drafts survive switching) */
   drafts: Record<string, string>;
+  /** group announcements keyed by exact group id (banner source) */
+  groupNotices: Record<string, string>;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -201,6 +203,7 @@ const initialState: ImState = {
   searchHighlight: '',
   searchHistory: [],
   drafts: {},
+  groupNotices: {},
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -408,6 +411,13 @@ class ImStore {
   friendName(uid: string | number): string {
     const friend = this.state.friends.find((item) => String(item.friend_id) === String(uid));
     return friend?.remark || friend?.profile?.nickname || friend?.profile?.username || '';
+  }
+
+  /** Group record for an exact or rounded group id. */
+  groupOf(gid: string | number): Group | undefined {
+    if (!gid) return undefined;
+    const key = roundedKey(gid);
+    return this.state.groups.find((item) => roundedKey(item.group_id) === key);
   }
 
   groupName(gid: string | number): string {
@@ -674,6 +684,7 @@ class ImStore {
           groupIds.find((gid) => roundedKey(gid) === roundedKey(group.group_id)) ?? String(group.group_id),
       })),
     });
+    this.rekeyGroupConversations();
 
     const failed = results.find((item) => item.status === 'rejected');
     if (failed && failed.status === 'rejected') {
@@ -762,7 +773,21 @@ class ImStore {
   /** Full group profile (name / notice / join policy) over REST. */
   async groupDetail(gid: string): Promise<Group | null> {
     try {
-      return await this.rest.group(gid);
+      const group = await this.rest.group(gid);
+      if (group) {
+        // Never let a stale/empty REST value clobber a just-saved announcement.
+        const notice = typeof group.notification === 'string' ? group.notification : '';
+        const known = this.state.groupNotices[gid];
+        if (notice || known === undefined) {
+          this.set({ groupNotices: { ...this.state.groupNotices, [gid]: notice } });
+        }
+        this.set({
+          groups: this.state.groups.map((item) => (roundedKey(item.group_id) === roundedKey(gid)
+            ? { ...item, display_id: item.display_id ?? gid }
+            : item)),
+        });
+      }
+      return group;
     } catch (err) {
       this.notify(wrapError(err).display, 'error');
       return null;
@@ -1023,11 +1048,45 @@ class ImStore {
     }
   }
 
+  /** Re-keys group conversations with the exact snowflake id (REST rounds them). */
+  private rekeyGroupConversations(): void {
+    const next = this.state.conversations.map((item) => {
+      if (item.type !== 2 || !item.conversation_id.startsWith('g_')) return item;
+      const exact = this.exactGroupId(item.conversation_id.slice(2));
+      const exactCid = groupConversationId(exact);
+      if (exactCid === item.conversation_id) return item;
+      return { ...item, group_id: exact, conversation_id: exactCid };
+    });
+    const changed = next.some((item, index) => item.conversation_id !== this.state.conversations[index].conversation_id);
+    if (!changed) return;
+    const activeCid = this.state.activeCid
+      ? next.find((item) => item.conversation_id === this.state.activeCid)?.conversation_id
+        ?? this.rekeyCid(this.state.activeCid, next)
+      : null;
+    this.set({ conversations: next, activeCid });
+  }
+
+  /** Maps an old conversation id onto its re-keyed replacement. */
+  private rekeyCid(cid: string, list: Conversation[]): string | null {
+    if (!cid.startsWith('g_')) return this.state.activeCid;
+    const exact = this.exactGroupId(cid.slice(2));
+    const target = groupConversationId(exact);
+    return list.some((item) => item.conversation_id === target) ? target : this.state.activeCid;
+  }
+
   private async refreshConversations(): Promise<void> {
     try {
       const items = await this.rest.conversations();
       const selfUid = this.state.me?.uid ?? '';
-      this.set({ conversations: items.map((item) => normalizeConversation(item, selfUid)) });
+      const fresh = items.map((item) => normalizeConversation(item, selfUid));
+      // A group opened before its first message has no REST row yet: keep the
+      // local conversation so the open chat does not collapse to empty.
+      const activeLocal = this.state.activeCid
+        ? this.state.conversations.find((item) => item.conversation_id === this.state.activeCid)
+        : undefined;
+      const keepLocal = activeLocal && !fresh.some((item) => item.conversation_id === activeLocal.conversation_id);
+      this.set({ conversations: keepLocal ? [...fresh, activeLocal] : fresh });
+      this.rekeyGroupConversations();
     } catch {
       // ignore
     }
@@ -1036,8 +1095,21 @@ class ImStore {
   async createGroup(name: string, memberIds: string[]): Promise<string> {
     const res = await this.groupAction('创建群', (client) =>
       client.request(GROUP_OP.CREATE, encodeCreateGroupReq({ name, memberIds, groupType: 1 }), decodeCreateGroupRes));
+    const gid = res.payload.group_id;
+    // Register the exact snowflake id before REST (which rounds int64 JSON) wins.
+    this.set({
+      groups: [
+        {
+          group_id: gid,
+          display_id: gid,
+          name: res.payload.name || name,
+          member_count: memberIds.length + 1,
+        },
+        ...this.state.groups.filter((item) => roundedKey(item.group_id) !== roundedKey(gid)),
+      ],
+    });
     this.notify(`群「${res.payload.name || name}」已创建`);
-    return res.payload.group_id;
+    return gid;
   }
 
   async inviteGroupMembers(gid: string, userIds: string[]): Promise<void> {
@@ -1078,6 +1150,24 @@ class ImStore {
   ): Promise<void> {
     await this.groupAction('更新群资料', (client) =>
       client.request(GROUP_OP.UPDATE_INFO, encodeUpdateGroupReq({ groupId: gid, ...patch }), decodeUpdateGroupRes));
+    if (patch.notification !== undefined) {
+      this.set({ groupNotices: { ...this.state.groupNotices, [gid]: patch.notification } });
+    }
+    // Keep the local cache in sync so the chat banner updates immediately.
+    this.set({
+      groups: this.state.groups.map((group) => {
+        const same = roundedKey(group.group_id) === roundedKey(gid);
+        if (!same) return group;
+        return {
+          ...group,
+          ...(patch.name !== undefined ? { name: patch.name } : {}),
+          ...(patch.notification !== undefined ? { notification: patch.notification } : {}),
+          ...(patch.needVerification !== undefined ? { need_verification: patch.needVerification } : {}),
+          ...(patch.lookMemberInfo !== undefined ? { look_member_info: patch.lookMemberInfo } : {}),
+          ...(patch.applyMemberFriend !== undefined ? { apply_member_friend: patch.applyMemberFriend } : {}),
+        };
+      }),
+    });
     this.notify('群资料已更新');
   }
 
@@ -1152,8 +1242,35 @@ class ImStore {
     void this.openConversation(cid);
   }
 
+  /** Learns exact group ids from the wire protocol (REST rounds int64). */
+  private async resolveGroupId(rounded: string): Promise<void> {
+    try {
+      const res = await this.client?.request(OP.MY_GROUPS, encodeMyGroupsReq(), decodeMyGroupsRes);
+      const ids = res?.payload.group_ids ?? [];
+      const exact = ids.find((id) => roundedKey(id) === roundedKey(rounded));
+      if (!exact) return;
+      this.set({
+        groups: this.state.groups.map((item) => (
+          roundedKey(item.group_id) === roundedKey(rounded)
+            ? { ...item, display_id: exact }
+            : item
+        )),
+      });
+    } catch {
+      // keep the rounded id; admin actions will report the server error
+    }
+  }
+
   openGroup(group: Group): void {
     const gid = this.exactGroupId(String(group.group_id));
+    // A rounded id cannot pass server-side member checks: resolve it first, then
+    // reopen so admin actions (settings, announcement) work.
+    if (!group.display_id) {
+      void this.resolveGroupId(String(group.group_id)).then(() => {
+        const exact = this.exactGroupId(String(group.group_id));
+        if (exact !== group.display_id) this.openGroup({ ...group, display_id: exact });
+      });
+    }
     const cid = groupConversationId(gid);
     // Keep the snapshot complete: a freshly created group may not be back from
     // REST yet, and the header title resolves through state.groups.
@@ -1232,14 +1349,19 @@ class ImStore {
   focusMessage(messageId: string): void {
     if (!messageId) return;
     this.set({ focusMessageId: null });
-    requestAnimationFrame(() => this.set({ focusMessageId: messageId }));
+    // A timer (not rAF) so the highlight also works in background tabs.
+    window.setTimeout(() => this.set({ focusMessageId: messageId }), 0);
   }
 
   /** Opens the conversation holding a message and highlights that message. */
   async jumpToMessage(cid: string, messageId: string, keyword = ''): Promise<void> {
     if (!cid) return;
     this.set({ searchHighlight: keyword.trim() });
-    await this.openConversation(cid);
+    try {
+      await this.openConversation(cid);
+    } catch {
+      // The conversation may fail to load; still mark the target message.
+    }
     this.focusMessage(messageId);
   }
 

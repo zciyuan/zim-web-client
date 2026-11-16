@@ -43,7 +43,9 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
 
   const selfUid = state.me?.uid ?? '';
   const myRole = members?.find((member) => String(member.user_id) === selfUid)?.role ?? 0;
-  const isOwner = myRole === 2;
+  // Fall back to the group detail owner: the member RPC may lag behind a fresh
+  // group and would otherwise hide every admin action.
+  const isOwner = myRole === 2 || (detail?.owner_id !== undefined && String(detail.owner_id) === selfUid);
   const isAdmin = isOwner || myRole === 1;
 
   const loadAll = useCallback(async () => {

@@ -617,7 +617,7 @@ function Sidebar() {
                             <Avatar name={name} seed={conversation.conversation_id} />
                             <span className="min-w-0 flex-1">
                               <span className="flex items-baseline justify-between gap-2">
-                                <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
+                                <span data-row-title className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
                                 <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
                               </span>
                               <span className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
@@ -702,7 +702,10 @@ function Sidebar() {
                     <Avatar name={name} seed={conversation.conversation_id} />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
-                        <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">
+                        <span
+                          data-row-title
+                          className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100"
+                        >
                           {name}
                         </span>
                         <span className="shrink-0 text-[11px] text-slate-400">
@@ -878,7 +881,10 @@ function Sidebar() {
                 <Avatar name={group.name ?? ''} seed={group.group_id} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline justify-between gap-2">
-                    <span className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">
+                    <span
+                      data-row-title
+                      className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100"
+                    >
                       {group.name || `群 ${String(group.group_id)}`}
                     </span>
                     <span className="shrink-0 text-[11px] text-slate-400">{group.member_count ?? 0} 人</span>

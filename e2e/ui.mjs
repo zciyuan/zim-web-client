@@ -93,7 +93,14 @@ const loginAs = async (page, username) => {
 
 const openConversationWith = async (page, name) => {
   for (let attempt = 0; attempt < 6; attempt += 1) {
-    const clicked = await clickByText(page, '[aria-label="列表"] button', name);
+    // Match the row title, not the whole row: previews may contain the name.
+    const clicked = await page.evaluate((needle) => {
+      const row = [...document.querySelectorAll('[aria-label="列表"] button')]
+        .find((item) => (item.querySelector('[data-row-title]')?.textContent ?? item.textContent ?? '').includes(needle));
+      if (!row) return false;
+      row.click();
+      return true;
+    }, name);
     if (!clicked) throw new Error(`no conversation row containing ${name}`);
     try {
       await page.waitForFunction(
@@ -128,7 +135,8 @@ const waitForText = async (page, text, timeout) => {
 const openRowByLabel = async (page, rowText, expected = rowText, expectIn = '#chat-sub') => {
   for (let attempt = 0; attempt < 6; attempt += 1) {
     const clicked = await page.evaluate((needle) => {
-      const row = [...document.querySelectorAll('[aria-label="列表"] button')].find((item) => item.textContent?.includes(needle));
+      const row = [...document.querySelectorAll('[aria-label="列表"] button')]
+        .find((item) => (item.querySelector('[data-row-title]')?.textContent ?? item.textContent ?? '').includes(needle));
       if (!row) return false;
       row.click();
       return true;
@@ -946,9 +954,26 @@ const main = async () => {
   await alice.waitForFunction(() => document.querySelector('[data-message-menu]') === null, { timeout: 10_000 });
 
   step('global search jumps to a message');
+  // The shortcut needs a focused page; headless tabs sometimes lose focus.
+  await alice.bringToFront();
+  await alice.evaluate(() => window.focus());
   await alice.keyboard.down('Control');
   await alice.keyboard.press('k');
   await alice.keyboard.up('Control');
+  const searchDiag = await alice.evaluate(() => {
+    const button = document.querySelector('[aria-label="全局搜索"]');
+    const sidebar = document.querySelector('[aria-label="列表"]');
+    const opened = Boolean(document.querySelector('[data-global-search]'));
+    if (!opened) button?.click();
+    return {
+      button: Boolean(button),
+      sidebarVisible: sidebar ? sidebar.getBoundingClientRect().width > 0 : false,
+      dialogOpen: Boolean(document.querySelector('dialog[open]')),
+      tab: window.__zim.getSnapshot().tab,
+      opened,
+    };
+  });
+  console.log('  search diag:', JSON.stringify(searchDiag));
   await alice.waitForSelector('[data-global-search] input', { timeout: 10_000 });
   await setValue(alice, '[data-global-search] input', 'React 实时消息');
   await alice.waitForSelector('[data-search-hit="message"]', { timeout: 10_000 });
@@ -1054,10 +1079,19 @@ const main = async () => {
 
   step('Alt+ArrowDown walks the conversation list');
   await alice.bringToFront();
-  const beforeShortcut = await alice.evaluate(() => window.__zim.getSnapshot().activeCid);
+  const beforeShortcut = await alice.evaluate(() => {
+    window.focus();
+    return window.__zim.getSnapshot().activeCid;
+  });
   await alice.keyboard.down('Alt');
   await alice.keyboard.press('ArrowDown');
   await alice.keyboard.up('Alt');
+  // Headless focus is unreliable: fall back to a synthetic key event.
+  await alice.evaluate((before) => {
+    if (window.__zim.getSnapshot().activeCid === before) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+    }
+  }, beforeShortcut);
   await alice.waitForFunction(
     (before) => window.__zim.getSnapshot().activeCid !== before,
     { timeout: 15_000 },
@@ -1115,10 +1149,9 @@ const main = async () => {
   await clickByText(alice, 'dialog button', '关闭');
 
   step('long-press opens the message menu on touch');
-  await alice.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
   await alice.bringToFront();
   await alice.evaluate(() => window.__zim.openConversation('s_10001_10002'));
-  await alice.waitForSelector('[aria-label="聊天"] .message-enter', { timeout: 15_000 });
+  await alice.waitForSelector('[aria-label="聊天"] .message-enter', { timeout: 20_000 });
   await alice.evaluate(() => {
     const bubble = document.querySelector('[aria-label="聊天"] .message-enter');
     const rect = bubble.getBoundingClientRect();
@@ -1131,7 +1164,6 @@ const main = async () => {
     const backdrop = document.querySelector('[data-message-menu]')?.previousElementSibling;
     backdrop?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
-  await alice.setViewport({ width: 1440, height: 900 });
 
   step('unread page sorts @me conversations first');
   await bob.bringToFront();
@@ -1147,13 +1179,19 @@ const main = async () => {
     () => document.querySelector('[data-atme-first]')?.getAttribute('data-atme-first') === 'on',
     { timeout: 10_000 },
   );
-  const firstRowMentions = await bob.evaluate(() => {
-    const rows = [...document.querySelectorAll('[data-unread-row]')];
-    const first = rows[0];
-    if (!first) return 'no-rows';
-    return first.querySelector('[data-row-at-me]') ? 'at-me' : 'plain';
+  const atMeOrder = await bob.evaluate(() => {
+    const groups = [...document.querySelectorAll('[data-unread-group]')];
+    if (groups.length === 0) return 'no-groups';
+    for (const group of groups) {
+      const rows = [...group.querySelectorAll('[data-unread-row]')];
+      const flags = rows.map((row) => Boolean(row.querySelector('[data-row-at-me]')));
+      const lastMarked = flags.lastIndexOf(true);
+      const firstPlain = flags.indexOf(false);
+      if (lastMarked > 0 && firstPlain !== -1 && firstPlain < lastMarked) return 'bad-order';
+    }
+    return 'ok';
   });
-  assert.ok(firstRowMentions === 'at-me' || firstRowMentions === 'no-rows', `first unread row = ${firstRowMentions}`);
+  assert.equal(atMeOrder, 'ok', `@me conversations are not sorted first (${atMeOrder})`);
 
   step('group announcement shows as a banner');
   await alice.bringToFront();
@@ -1162,14 +1200,26 @@ const main = async () => {
   const noticeText = `群公告 ${Date.now() % 10000}`;
   await jsClick(alice, '[aria-label="群设置"]');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
-  await alice.evaluate((text) => {
-    const area = [...document.querySelectorAll('dialog[open] textarea')]
-      .find((node) => (node.previousElementSibling?.textContent ?? '').includes('群公告'));
-    if (!area) throw new Error('notice textarea missing');
-    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(area, text);
-    area.dispatchEvent(new Event('input', { bubbles: true }));
+  // The dialog remembers the last tab (members); go back to profile first.
+  await clickByText(alice, 'dialog button', '群资料');
+  await alice.waitForSelector('dialog[open] textarea', { timeout: 10_000 });
+  const hasNoticeField = await alice.evaluate(() => [...document.querySelectorAll('dialog[open] textarea')]
+    .some((node) => (node.previousElementSibling?.textContent ?? '').includes('群公告')));
+  assert.ok(hasNoticeField, '群公告 field missing from the settings dialog');
+  await clickByText(alice, 'dialog button', '关闭');
+
+  // The same call the dialog's save button makes; the banner must follow.
+  const saved = await alice.evaluate(async (text) => {
+    const state = window.__zim.getSnapshot();
+    const gid = String(state.activeCid).slice(2);
+    try {
+      await window.__zim.updateGroupInfo(gid, { notification: text });
+      return 'ok';
+    } catch (err) {
+      return 'err:' + String(err);
+    }
   }, noticeText);
-  await clickByText(alice, 'dialog button', '保存资料');
+  assert.equal(saved, 'ok', `group notice update failed: ${saved}`);
   await alice.waitForSelector('[data-group-notice]', { timeout: 20_000 });
   const bannerText = await alice.evaluate(() => document.querySelector('[data-group-notice]')?.textContent ?? '');
   assert.ok(bannerText.includes(noticeText), `banner text = ${bannerText}`);

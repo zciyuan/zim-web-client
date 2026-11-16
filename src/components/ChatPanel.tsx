@@ -851,8 +851,7 @@ export function ChatPanel() {
   const groupNotice = (() => {
     if (!isGroup || !state.activeCid?.startsWith('g_')) return '';
     const gid = state.activeCid.slice(2);
-    const group = state.groups.find((item) => String(item.display_id ?? item.group_id) === gid);
-    return (group?.notification ?? '').trim();
+    return (state.groupNotices[gid] ?? imStore.groupOf(gid)?.notification ?? '').trim();
   })();
 
   // Read indicator for direct chats: compare my last message seq with the
