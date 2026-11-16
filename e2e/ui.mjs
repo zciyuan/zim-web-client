@@ -987,6 +987,97 @@ const main = async () => {
     { timeout: 20_000 },
   );
 
+  step('group announcement shows as a banner');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
+  await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
+  const noticeText = `群公告 ${Date.now() % 10000}`;
+  await jsClick(alice, '[aria-label="群设置"]');
+  await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
+  await alice.evaluate((text) => {
+    const area = [...document.querySelectorAll('dialog[open] textarea')]
+      .find((node) => (node.previousElementSibling?.textContent ?? '').includes('群公告'));
+    if (!area) throw new Error('notice textarea missing');
+    Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(area, text);
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+  }, noticeText);
+  await clickByText(alice, 'dialog button', '保存资料');
+  await alice.waitForSelector('[data-group-notice]', { timeout: 20_000 });
+  const bannerText = await alice.evaluate(() => document.querySelector('[data-group-notice]')?.textContent ?? '');
+  assert.ok(bannerText.includes(noticeText), `banner text = ${bannerText}`);
+
+  step('quote reply mentions the original author');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  await alice.evaluate(() => {
+    const bubbles = [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .filter((node) => node.getAttribute('data-mine') === 'false');
+    const bubble = bubbles[bubbles.length - 1];
+    const button = [...bubble.querySelectorAll('button')].find((item) => item.textContent === '引用');
+    button?.click();
+  });
+  await alice.waitForSelector('[data-quote-preview]', { timeout: 10_000 });
+  const mentionReply = `引用回复 ${Date.now() % 10000}`;
+  await setValue(alice, 'textarea', mentionReply);
+  await alice.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    button?.click();
+  });
+  await alice.waitForFunction(
+    (needle) => [...document.querySelectorAll('[aria-label="聊天"] .message-enter')]
+      .some((node) => (node.textContent ?? '').includes(needle) && node.querySelector('[data-mention]')),
+    { timeout: 20_000 },
+    mentionReply,
+  );
+
+  step('unread rows can be marked read individually');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(2)');
+  await alice.waitForSelector('[data-unread-page]', { timeout: 10_000 });
+  const markReadBefore = await alice.evaluate(() => document.querySelectorAll('[data-unread-row]').length);
+  await alice.evaluate(() => document.querySelector('[data-mark-read]')?.click());
+  await alice.waitForFunction(
+    (before) => document.querySelectorAll('[data-unread-row]').length < before,
+    { timeout: 20_000 },
+    markReadBefore,
+  );
+
+  step('conversation list can sort unread first');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
+  await alice.waitForSelector('[data-unread-first]', { timeout: 10_000 });
+  await jsClick(alice, '[aria-label="未读优先"]');
+  await alice.waitForFunction(
+    () => document.querySelector('[data-unread-first]')?.getAttribute('data-unread-first') === 'on',
+    { timeout: 10_000 },
+  );
+  const unreadFirstTop = await alice.evaluate(() => {
+    const rows = [...document.querySelectorAll('[data-conversation-row]')];
+    const first = rows[0];
+    const id = first?.getAttribute('data-conversation-row') ?? '';
+    const state = window.__zim.getSnapshot();
+    const conversation = state.conversations.find((item) => item.conversation_id === id);
+    return Number(conversation?.unread ?? 0);
+  });
+  assert.ok(unreadFirstTop > 0, `first row has no unread: ${unreadFirstTop}`);
+  await jsClick(alice, '[aria-label="未读优先"]');
+
+  step('search keyword is highlighted in the message');
+  await alice.bringToFront();
+  await jsClick(alice, '[aria-label="消息搜索"]');
+  await alice.waitForSelector('[aria-label="搜索本会话消息"]', { timeout: 10_000 });
+  await setValue(alice, '[aria-label="搜索本会话消息"]', 'React');
+  await alice.evaluate(() => {
+    const buttons = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .filter((item) => item.textContent === '搜索');
+    buttons[buttons.length - 1]?.click();
+  });
+  await alice.waitForSelector('[data-search-results] [data-search-result]', { timeout: 15_000 });
+  await alice.evaluate(() => document.querySelector('[data-search-result]')?.click());
+  await alice.waitForSelector('[data-highlight]', { timeout: 15_000 });
+
   step('unread page lists conversations with unread messages');
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(2)');

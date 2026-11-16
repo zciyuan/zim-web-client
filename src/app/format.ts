@@ -224,21 +224,36 @@ export const atOf = (raw: string): string[] => {
   if (!Array.isArray(at)) return [];
   return at.map((item) => String(item));
 };
-/** True when the stored brief mentions the given uid (or @all). */
-export const mentionsInBrief = (raw: string, selfUid: string): boolean => {
-  const at = atOf(raw);
-  if (at.length === 0) return false;
-  return at.includes(selfUid) || at.includes('all');
+/**
+ * True when a message mentions the given user, either through the structured
+ * `at` array (including @all) or through "@nickname" in the text. The text
+ * fallback keeps quote replies (built server-side, no `at`) detectable.
+ */
+export const mentionsUser = (
+  raw: string,
+  selfUid: string,
+  selfName?: string,
+  explicit?: string[],
+): boolean => {
+  const at = explicit?.length ? explicit.map(String) : atOf(raw);
+  if (at.includes(selfUid) || at.includes('all')) return true;
+  if (!selfName) return false;
+  const text = messageText(raw, 1).text;
+  return text.includes(`@${selfName}`);
 };
+
+/** True when the stored brief mentions the given uid (or @all). */
+export const mentionsInBrief = (raw: string, selfUid: string, selfName?: string): boolean =>
+  mentionsUser(raw, selfUid, selfName);
 
 /** True when any unread message in the thread mentions the given uid. */
 export const mentionsInUnread = (
   items: { seq: string; content: string; at_user_ids?: string[]; send_id: string }[],
   readSeq: number,
   selfUid: string,
+  selfName?: string,
 ): boolean => items.some((item) => {
   if (Number(item.seq) <= readSeq) return false;
   if (String(item.send_id) === selfUid) return false;
-  const at = item.at_user_ids?.length ? item.at_user_ids.map(String) : atOf(item.content);
-  return at.includes(selfUid) || at.includes('all');
+  return mentionsUser(item.content, selfUid, selfName, item.at_user_ids?.map(String));
 });

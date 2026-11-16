@@ -4,19 +4,34 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
-import { atOf, attachmentOf, formatBytes, formatDuration, mergeOf, quoteOf, uploadOf } from '../app/format';
+import { atOf, attachmentOf, formatBytes, formatDuration, mentionsUser, mergeOf, quoteOf, uploadOf } from '../app/format';
 import { daySeparator, formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
 
-/** Renders "@name" tokens as highlighted mentions. */
-function MentionText({ text }: { text: string }) {
+/** Renders "@name" tokens as mentions and one search keyword as <mark>. */
+function MentionText({ text, highlight }: { text: string; highlight?: string }) {
   const parts = text.split(/(@[^\s@]+)/g);
+  const marked = (chunk: string, key: number) => {
+    if (!highlight || !chunk.toLowerCase().includes(highlight.toLowerCase())) {
+      return <span key={key}>{chunk}</span>;
+    }
+    const index = chunk.toLowerCase().indexOf(highlight.toLowerCase());
+    return (
+      <span key={key}>
+        {chunk.slice(0, index)}
+        <mark data-highlight className="rounded bg-amber-200 px-0.5 text-slate-900 dark:bg-amber-500/50 dark:text-slate-100">
+          {chunk.slice(index, index + highlight.length)}
+        </mark>
+        {chunk.slice(index + highlight.length)}
+      </span>
+    );
+  };
   return (
     <>
       {parts.map((part, index) => (part.startsWith('@') && part.length > 1
         ? <span key={index} data-mention className="font-medium text-indigo-600 dark:text-indigo-400">{part}</span>
-        : <span key={index}>{part}</span>
+        : marked(part, index)
       ))}
     </>
   );
@@ -34,6 +49,9 @@ function Bubble({
   onPreviewImage,
   onMenu,
   autoEdit,
+  canRetryUpload,
+  onRetryUpload,
+  highlight,
 }: {
   message: UiMessage;
   mine: boolean;
@@ -48,6 +66,7 @@ function Bubble({
   autoEdit?: boolean;
   canRetryUpload?: boolean;
   onRetryUpload?: () => void;
+  highlight?: string;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
@@ -58,7 +77,7 @@ function Bubble({
   const canManage = mine && state === 'sent' && Boolean(message.server_msg_id)
     && message.status !== 1 && message.status !== 2;
   const atUids = message.at_user_ids?.length ? message.at_user_ids.map(String) : atOf(message.content);
-  const atMe = !mine && (atUids.includes(String(imStore.me?.uid ?? '')) || atUids.includes('all'));
+  const atMe = !mine && mentionsUser(message.content, String(imStore.me?.uid ?? ''), imStore.me?.name, atUids);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
 
@@ -250,7 +269,7 @@ function Bubble({
             ) : (
               message.status === 2
                 ? '该消息已删除'
-                : <MentionText text={text} />
+                : <MentionText text={text} highlight={highlight} />
             )}
           </div>
         )}
@@ -262,9 +281,14 @@ function Bubble({
         ) : null}
         {state === 'failed' ? (
           <div className="mt-0.5 text-right text-[11px] text-rose-600">
-            发送失败{' '}
-            <button type="button" className="text-indigo-600 underline" onClick={() => void imStore.retryMessage(message)}>
-              重试
+            {canRetryUpload ? '上传失败' : '发送失败'}{' '}
+            <button
+              type="button"
+              data-retry-upload={canRetryUpload ? 'true' : 'false'}
+              className="text-indigo-600 underline"
+              onClick={() => (canRetryUpload ? onRetryUpload?.() : void imStore.retryMessage(message))}
+            >
+              {canRetryUpload ? '重试上传' : '重试'}
             </button>
           </div>
         ) : null}
@@ -706,6 +730,13 @@ export function ChatPanel() {
   );
   const thread = state.activeCid ? state.threads[state.activeCid] : undefined;
   const isGroup = conversation?.type === 2;
+  // Group announcement (group.notification): shown as a banner in group chats.
+  const groupNotice = (() => {
+    if (!isGroup || !state.activeCid?.startsWith('g_')) return '';
+    const gid = state.activeCid.slice(2);
+    const group = state.groups.find((item) => String(item.display_id ?? item.group_id) === gid);
+    return (group?.notification ?? '').trim();
+  })();
 
   // Read indicator for direct chats: compare my last message seq with the
   // peer's watermark delivered by 1906.
@@ -870,6 +901,7 @@ export function ChatPanel() {
             <button
               type="button"
               onClick={() => setMembersOpen(true)}
+              aria-label="群设置"
               className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
             >
               群设置
@@ -913,13 +945,14 @@ export function ChatPanel() {
                   data-search-result
                   onClick={() => {
                     setSearchOpen(false);
-                    if (item.server_msg_id) imStore.focusMessage(item.server_msg_id);
+                    const cid = conversation?.conversation_id ?? '';
+                    if (item.server_msg_id) void imStore.jumpToMessage(cid, item.server_msg_id, keyword.trim());
                   }}
                   className="flex w-full items-baseline gap-2 rounded-lg px-2 py-1 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800/60"
                 >
                   <span className="shrink-0 text-slate-400">{formatClock(item.send_time)}</span>
                   <span className="min-w-0 flex-1 truncate text-slate-700 dark:text-slate-200">
-                    {messageText(item.content, item.msg_type).text}
+                    <MentionText text={messageText(item.content, item.msg_type).text} highlight={keyword.trim()} />
                   </span>
                 </button>
               ))}
@@ -932,6 +965,23 @@ export function ChatPanel() {
         ref={scrollRef}
         className="relative flex flex-1 flex-col overflow-y-auto px-4 py-4"
       >
+        {groupNotice ? (
+          <div
+            data-group-notice
+            className="mb-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+          >
+            <span className="shrink-0 font-medium">📢 群公告</span>
+            <span className="line-clamp-3 flex-1 whitespace-pre-wrap">{groupNotice}</span>
+            <button
+              type="button"
+              aria-label="编辑群公告"
+              onClick={() => setMembersOpen(true)}
+              className="shrink-0 rounded border border-amber-300 px-1.5 text-[10px] hover:border-amber-500 dark:border-amber-800"
+            >
+              编辑
+            </button>
+          </div>
+        ) : null}
         {dragging ? (
           <div
             data-drag-overlay="true"
@@ -991,6 +1041,7 @@ export function ChatPanel() {
                 autoEdit={Boolean(editTarget) && editTarget === message.server_msg_id}
                 canRetryUpload={state.uploadRetries.includes(message.client_msg_id)}
                 onRetryUpload={() => void imStore.retryUpload(message.client_msg_id)}
+                highlight={state.focusMessageId === message.server_msg_id ? state.searchHighlight : undefined}
                   selectable={selectMode}
                   selected={selectedIds.includes(message.server_msg_id)}
                   onSelect={() => {

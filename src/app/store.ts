@@ -151,6 +151,8 @@ export interface ImState {
   focusMessageId: string | null;
   /** drafts whose upload failed and can be retried */
   uploadRetries: string[];
+  /** keyword highlighted inside the focused message (search jumps) */
+  searchHighlight: string;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -192,6 +194,7 @@ const initialState: ImState = {
   unreadAnchors: {},
   focusMessageId: null,
   uploadRetries: [],
+  searchHighlight: '',
   quoteTarget: null,
   call: emptyCall(),
   lastCallError: '',
@@ -1212,8 +1215,9 @@ class ImStore {
   }
 
   /** Opens the conversation holding a message and highlights that message. */
-  async jumpToMessage(cid: string, messageId: string): Promise<void> {
+  async jumpToMessage(cid: string, messageId: string, keyword = ''): Promise<void> {
     if (!cid) return;
+    this.set({ searchHighlight: keyword.trim() });
     await this.openConversation(cid);
     this.focusMessage(messageId);
   }
@@ -1593,8 +1597,16 @@ class ImStore {
     if (!target || !target.server_msg_id || !conversation || !this.client) return;
     const clientMsgId = crypto.randomUUID();
     const preview = messageText(target.content, target.msg_type).text.slice(0, 120);
+    // Quote replies mention the original author so they get the "@me" badge.
+    const selfUid = String(this.state.me?.uid ?? '');
+    const author = String(target.send_id);
+    const authorName = this.senderName(author);
+    const mention = author && author !== selfUid && !text.includes(`@${authorName}`)
+      ? `@${authorName} `
+      : '';
+    const replyText = `${mention}${text}`;
     const content = JSON.stringify({
-      text,
+      text: replyText,
       quote: { server_msg_id: target.server_msg_id, send_id: target.send_id, msg_type: target.msg_type, text: preview },
     });
     const draft: UiMessage = {
@@ -1624,7 +1636,7 @@ class ImStore {
           recvId: conversation.type === 1 ? conversation.peer_id : undefined,
           groupId: conversation.type === 2 ? conversation.group_id : undefined,
           serverMsgId: target.server_msg_id,
-          content: JSON.stringify({ text }),
+          content: JSON.stringify({ text: replyText }),
         }),
         decodeQuoteRes,
       );

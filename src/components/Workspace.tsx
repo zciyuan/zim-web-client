@@ -5,7 +5,7 @@ import { ChatPanel } from './ChatPanel';
 import { AddFriendDialog } from './AddFriendDialog';
 import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
-import { atOf, formatClock, formatListTime, mentionsInBrief, mentionsInUnread, messagePreview, previewConversation } from '../app/format';
+import { atOf, formatClock, formatListTime, mentionsInBrief, mentionsInUnread, messagePreview, messageText, previewConversation } from '../app/format';
 
 const TABS: { key: Tab; icon: string; label: string }[] = [
   { key: 'conversations', icon: '💬', label: '会话' },
@@ -167,15 +167,47 @@ function Sidebar() {
     if (searchOpen) searchInput.current?.focus();
   }, [searchOpen]);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [unreadFirst, setUnreadFirst] = useState(false);
+
+  useEffect(() => {
+    try {
+      setUnreadFirst(localStorage.getItem('zim.unreadFirst') === '1');
+    } catch {
+      // private mode: keep the default order
+    }
+  }, []);
+
+  const toggleUnreadFirst = () => {
+    setUnreadFirst((current) => {
+      const next = !current;
+      try {
+        localStorage.setItem('zim.unreadFirst', next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  const conversationRows = [...state.conversations].sort((a, b) => {
+    const pinDiff = Number(b.is_pinned ?? 0) - Number(a.is_pinned ?? 0);
+    if (pinDiff !== 0) return pinDiff;
+    if (unreadFirst) {
+      const unreadDiff = (Number(b.unread ?? 0) > 0 ? 1 : 0) - (Number(a.unread ?? 0) > 0 ? 1 : 0);
+      if (unreadDiff !== 0) return unreadDiff;
+    }
+    return Number(b.last_msg_at ?? 0) - Number(a.last_msg_at ?? 0);
+  });
   const selfUid = String(state.me?.uid ?? '');
+  const selfName = String(state.me?.name ?? '');
   const unreadTotal = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
   // Unread page groups by chat kind so long lists stay scannable.
   // A row shows "[有人@我]" when the last message or an unread one mentions me.
   const rowMentionsMe = (conversation: typeof state.conversations[number]): boolean => {
-    if (mentionsInBrief(conversation.last_msg_brief ?? '', selfUid)) return true;
+    if (mentionsInBrief(conversation.last_msg_brief ?? '', selfUid, selfName)) return true;
     const thread = state.threads[conversation.conversation_id];
     if (!thread) return false;
-    return mentionsInUnread(thread.items, Number(conversation.read_seq ?? 0), selfUid);
+    return mentionsInUnread(thread.items, Number(conversation.read_seq ?? 0), selfUid, selfName);
   };
 
   const unreadGroups = [
@@ -229,7 +261,7 @@ function Sidebar() {
     if (unreadFilter === 'at') {
       return items.some((item) => {
         const at = item.at_user_ids?.length ? item.at_user_ids.map(String) : atOf(item.content);
-        return at.includes(selfUid) || at.includes('all');
+        return at.includes(selfUid) || at.includes('all') || messageText(item.content, 1).text.includes(`@${selfName}`);
       });
     }
     const uid = unreadFilter.startsWith('uid:') ? unreadFilter.slice(4) : '';
@@ -279,6 +311,22 @@ function Sidebar() {
               className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs text-slate-500 transition hover:border-indigo-400 hover:text-slate-900 dark:border-slate-700 dark:hover:text-slate-100"
             >
               + 新建
+            </button>
+          ) : null}
+          {state.tab === 'conversations' ? (
+            <button
+              type="button"
+              aria-label="未读优先"
+              aria-pressed={unreadFirst}
+              data-unread-first={unreadFirst ? 'on' : 'off'}
+              onClick={toggleUnreadFirst}
+              className={`rounded-lg border px-2 py-0.5 text-xs transition ${
+                unreadFirst
+                  ? 'border-indigo-400 bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300'
+                  : 'border-slate-200 text-slate-500 hover:border-indigo-400 dark:border-slate-700'
+              }`}
+            >
+              未读优先
             </button>
           ) : null}
           <button
@@ -457,6 +505,18 @@ function Sidebar() {
                                 <span className="truncate">{previewConversation(conversation)}</span>
                               </span>
                             </span>
+                            <button
+                              type="button"
+                              data-mark-read={conversation.conversation_id}
+                              aria-label={`标记 ${name} 已读`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                void imStore.markRead(conversation.conversation_id);
+                              }}
+                              className="shrink-0 rounded-full border border-slate-200 px-1.5 text-[11px] leading-[18px] text-slate-500 hover:border-indigo-400 hover:text-indigo-600 dark:border-slate-700"
+                            >
+                              ✓
+                            </button>
                             <span className="shrink-0 rounded-full bg-rose-500 px-1.5 text-[11px] leading-[18px] text-white">
                               {unread > 99 ? '99+' : unread}
                             </span>
@@ -475,8 +535,7 @@ function Sidebar() {
           state.conversations.length === 0 ? (
             <EmptyList text="还没有会话，去「好友」发起聊天" />
           ) : (
-            [...state.conversations]
-              .sort((a, b) => Number(b.is_pinned ?? 0) - Number(a.is_pinned ?? 0))
+            conversationRows
               .map((conversation) => {
                 const isGroup = conversation.type === 2;
                 const name = imStore.conversationTitle(conversation);
