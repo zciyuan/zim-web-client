@@ -1,19 +1,24 @@
 import { useMemo, useState, type FormEvent } from 'react';
 
 import { imStore, useIm } from '../app/store';
-import { loadLoginPrefs, saveLoginPrefs } from '../app/loginPrefs';
+import { loadLoginPrefs } from '../app/loginPrefs';
 
 type Mode = 'login' | 'register';
 
-/** Login / sign-up card. Registration returns tokens, so it enters the app directly. */
+/**
+ * Login / sign-up card.
+ *
+ * Only the account name is remembered locally. Passwords are left to the
+ * browser's password manager: the inputs carry the standard `autocomplete`
+ * hints and a successful login is reported through the Credential Management
+ * API (see `offerPasswordSave`), so Chrome/Edge/Safari offer to save it.
+ */
 export function LoginView() {
   const state = useIm();
-  // The last successful login is remembered locally: no hard-coded demo account.
   const saved = useMemo(() => loadLoginPrefs(), []);
   const [mode, setMode] = useState<Mode>('login');
   const [username, setUsername] = useState(saved.username);
-  const [password, setPassword] = useState(saved.password);
-  const [remember, setRemember] = useState(saved.remember);
+  const [password, setPassword] = useState('');
   const [nickname, setNickname] = useState('');
   const [endpoint, setEndpoint] = useState(state.endpoint || saved.endpoint);
   const busy = state.status === 'authenticating';
@@ -21,10 +26,10 @@ export function LoginView() {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
-      // The store persists the credentials once the server accepts them, so the
-      // form is pre-filled on the next mount even if we unmount immediately.
+      // The store remembers the account and offers the password to the browser
+      // password manager once the server accepts the credentials.
       if (mode === 'login') {
-        await imStore.login(username, password, endpoint, remember);
+        await imStore.login(username, password, endpoint);
       } else {
         await imStore.register(username, password, nickname, endpoint);
       }
@@ -35,9 +40,8 @@ export function LoginView() {
 
   const switchMode = (next: Mode) => {
     setMode(next);
-    // Switching to sign-up must not send the saved password to a new account.
-    if (next === 'register') setPassword('');
-    else if (saved.username === username) setPassword(saved.password);
+    // Never carry a typed password from one mode to the other.
+    setPassword('');
   };
 
   if (state.status === 'restoring') {
@@ -81,13 +85,17 @@ export function LoginView() {
           ))}
         </div>
 
-        <form onSubmit={submit} className="space-y-4">
+        {/* method/action kept empty: the form is submitted over the socket. */}
+        <form onSubmit={submit} method="post" autoComplete="on" className="space-y-4">
           <label className="block">
             <span className="mb-1 block text-xs text-slate-500">账号</span>
             <input
+              name="username"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
               autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
               required
               minLength={3}
               maxLength={32}
@@ -115,6 +123,7 @@ export function LoginView() {
           <label className="block">
             <span className="mb-1 block text-xs text-slate-500">密码</span>
             <input
+              name="password"
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
@@ -124,12 +133,18 @@ export function LoginView() {
               placeholder={isRegister ? '至少 8 位' : ''}
               className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-3 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-800 dark:focus:ring-indigo-900/40"
             />
+            {!isRegister ? (
+              <span className="mt-1 block text-[11px] text-slate-400">
+                密码不保存在本站，由浏览器密码管理器（Chrome / Edge / Safari）在登录成功后提示保存。
+              </span>
+            ) : null}
           </label>
 
           {isRegister ? (
             <label className="block">
               <span className="mb-1 block text-xs text-slate-500">昵称（可选）</span>
               <input
+                name="nickname"
                 value={nickname}
                 onChange={(event) => setNickname(event.target.value)}
                 maxLength={32}
@@ -142,6 +157,7 @@ export function LoginView() {
           <label className="block">
             <span className="mb-1 block text-xs text-slate-500">接入地址</span>
             <input
+              name="endpoint"
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
               placeholder="留空 = 同源（Web/PWA 推荐）"
@@ -151,33 +167,6 @@ export function LoginView() {
               桌面端（Tauri）与 App（Capacitor）填服务器地址，例如 https://im.example.com
             </span>
           </label>
-
-          {!isRegister ? (
-            <label className="flex items-center gap-2 text-xs text-slate-500">
-              <input
-                type="checkbox"
-                checked={remember}
-                aria-label="记住密码"
-                data-remember-password
-                onChange={(event) => {
-                  const next = event.target.checked;
-                  setRemember(next);
-                  // Turning the option off only drops the password: the last
-                  // account (and the recent list) stay available.
-                  if (!next) {
-                    saveLoginPrefs({
-                      username: username || saved.username,
-                      password: '',
-                      remember: false,
-                      endpoint,
-                    });
-                  }
-                }}
-                className="h-3.5 w-3.5"
-              />
-              记住密码（保存在本机浏览器）
-            </label>
-          ) : null}
 
           {state.authError ? (
             <p role="alert" className="text-xs text-rose-600">

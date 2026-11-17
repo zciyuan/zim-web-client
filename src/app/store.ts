@@ -9,7 +9,7 @@ import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
-import { saveLoginPrefs } from './loginPrefs';
+import { offerPasswordSave, saveLoginPrefs } from './loginPrefs';
 import { captureVideoPoster, compressImage, measureImage, measureMedia } from './image';
 import { randomId } from './id';
 import { detectRtcSupport, explainRtcError } from './rtc-support';
@@ -585,7 +585,7 @@ class ImStore {
     }
   }
 
-  async login(username: string, password: string, rawEndpoint: string, remember = true): Promise<void> {
+  async login(username: string, password: string, rawEndpoint: string): Promise<void> {
     const endpoint = normalizeHttpBase(rawEndpoint);
     localStorage.setItem(ENDPOINT_KEY, endpoint);
     this.set({ status: 'authenticating', authError: '', endpoint });
@@ -593,9 +593,11 @@ class ImStore {
 
     try {
       const session = await this.rest.login({ username, password, platform: 4 });
-      // Remember before the workspace renders: the login form re-reads this on
-      // its next mount, so a logout or reload starts pre-filled.
-      saveLoginPrefs({ username, password, remember, endpoint });
+      // Remember the account (never the password) before the workspace renders:
+      // the login form re-reads this on its next mount.
+      saveLoginPrefs({ username, endpoint });
+      // Hand the secret to the browser's password manager instead of localStorage.
+      offerPasswordSave(username, password);
       await this.enterWorkspace(session.access_token, endpoint, username);
     } catch (err) {
       const error = wrapError(err);
@@ -608,7 +610,7 @@ class ImStore {
   }
 
   /** Creates an account and enters the app in one round trip. */
-  async register(username: string, password: string, nickname: string, rawEndpoint: string, remember = true): Promise<void> {
+  async register(username: string, password: string, nickname: string, rawEndpoint: string): Promise<void> {
     const endpoint = normalizeHttpBase(rawEndpoint);
     localStorage.setItem(ENDPOINT_KEY, endpoint);
     this.set({ status: 'authenticating', authError: '', endpoint });
@@ -616,7 +618,8 @@ class ImStore {
 
     try {
       const session = await this.rest.register({ username, password, nickname, platform: 4 });
-      saveLoginPrefs({ username, password, remember, endpoint });
+      saveLoginPrefs({ username, endpoint });
+      offerPasswordSave(username, password, nickname || undefined);
       await this.enterWorkspace(session.access_token, endpoint, username);
     } catch (err) {
       const error = wrapError(err);
