@@ -18,25 +18,16 @@ export function LoginView() {
   const [endpoint, setEndpoint] = useState(state.endpoint || saved.endpoint);
   const busy = state.status === 'authenticating';
 
-  const persist = (name: string, secret: string, rememberPassword: boolean, target: string) => {
-    const next = saveLoginPrefs({
-      username: name,
-      password: secret,
-      remember: rememberPassword,
-      endpoint: target.trim(),
-    });
-    setRemember(next.remember);
-  };
-
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
+      // The store persists the credentials once the server accepts them, so the
+      // form is pre-filled on the next mount even if we unmount immediately.
       if (mode === 'login') {
-        await imStore.login(username, password, endpoint);
+        await imStore.login(username, password, endpoint, remember);
       } else {
         await imStore.register(username, password, nickname, endpoint);
       }
-      persist(username, password, remember, endpoint);
     } catch {
       // The store already surfaced the reason through state.authError.
     }
