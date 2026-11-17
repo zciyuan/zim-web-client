@@ -2896,18 +2896,30 @@ class ImStore {
    * Asks the device for microphone (and camera for video calls) before any
    * invite/answer/join happens, so a denied permission never creates a room or
    * a ringing call. Tracks are stopped right away: LiveKit re-opens them when
-   * it publishes.
+   * it publishes. When only the camera is unavailable the call degrades to
+   * voice instead of failing.
    */
-  private async ensureMediaPermissions(video: boolean): Promise<boolean> {
+  private async ensureMediaPermissions(video: boolean): Promise<{ ok: boolean; video: boolean }> {
     if (!navigator.mediaDevices?.getUserMedia) {
       this.notify('当前浏览器不支持麦克风/摄像头', 'error');
-      return false;
+      return { ok: false, video: false };
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
       stream.getTracks().forEach((track) => track.stop());
-      return true;
+      return { ok: true, video };
     } catch (err) {
+      if (video) {
+        // Camera missing or blocked: keep the call usable as voice.
+        try {
+          const audio = await navigator.mediaDevices.getUserMedia({ audio: true });
+          audio.getTracks().forEach((track) => track.stop());
+          this.notify('摄像头不可用，已切换为语音通话');
+          return { ok: true, video: false };
+        } catch {
+          // Fall through to the audio failure copy below.
+        }
+      }
       const name = (err as { name?: string })?.name ?? '';
       let detail: string;
       if (name === 'NotAllowedError' || name === 'SecurityError') {
@@ -2920,7 +2932,7 @@ class ImStore {
         detail = `无法访问${video ? '麦克风/摄像头' : '麦克风'}，请检查系统权限`;
       }
       this.notify(detail, 'error');
-      return false;
+      return { ok: false, video: false };
     }
   }
 
@@ -3169,8 +3181,10 @@ class ImStore {
       return;
     }
     // Ask for the mic/camera first: a denied permission must not create a room
-    // or ring the other side.
-    if (!(await this.ensureMediaPermissions(media === 2))) return;
+    // or ring the other side. A camera-only failure degrades to voice.
+    const permission = await this.ensureMediaPermissions(media === 2);
+    if (!permission.ok) return;
+    media = permission.video ? 2 : 1;
     const callId = randomId();
     const isGroup = conversation.type === 2;
     const targetType: 1 | 2 = isGroup ? 2 : 1;
@@ -3268,8 +3282,10 @@ class ImStore {
     }
     // Permission first: answering without a mic would leave the caller hearing
     // silence. Denial keeps the sheet ringing so the user can grant and retry.
-    if (!(await this.ensureMediaPermissions(call.media === 2))) return;
-    this.set({ call: { ...call, phase: 'connecting' } });
+    const permission = await this.ensureMediaPermissions(call.media === 2);
+    if (!permission.ok) return;
+    const video = permission.video;
+    this.set({ call: { ...call, phase: 'connecting', media: video ? 2 : 1 } });
     this.clearCallTimers();
     this.armConnectTimer();
     try {
@@ -3284,10 +3300,10 @@ class ImStore {
           callId: call.callId,
           token: answer.payload.token,
           sfuUrl: answer.payload.sfu_url,
-          video: call.media === 2,
+          video,
         });
       } else {
-        await this.joinCallRoom(call.callId, call.media === 2);
+        await this.joinCallRoom(call.callId, video);
       }
       this.clearCallTimers();
       // The SFU snapshot may arrive after this transition: seed the roster with
@@ -3519,8 +3535,9 @@ class ImStore {
     }
     const room = this.state.groupCalls[groupId];
     const targetType: CallTargetType = room?.targetType ?? (this.groupTypeOf(groupId) === 3 ? 3 : 2);
-    // Ask for the mic/camera before joining the SFU.
-    if (!(await this.ensureMediaPermissions((room?.media ?? 1) === 2))) return;
+    // Ask for the mic/camera before joining the SFU (camera failure degrades).
+    const permission = await this.ensureMediaPermissions((room?.media ?? 1) === 2);
+    if (!permission.ok) return;
     const selfUid = String(this.state.me?.uid ?? '');
     this.set({
       call: {
@@ -3557,7 +3574,7 @@ class ImStore {
           callId: payload.call_id,
           media,
           room: payload.room,
-          videoOn: media === 2,
+          videoOn: media === 2 && permission.video,
           participants: Array.from(new Set([selfUid, ...payload.participants].filter(Boolean))),
         },
       });
@@ -3565,7 +3582,7 @@ class ImStore {
         callId: payload.call_id,
         token: payload.token,
         sfuUrl: payload.sfu_url,
-        video: media === 2,
+        video: media === 2 && permission.video,
       });
     } catch (err) {
       const wrapped = wrapError(err);
