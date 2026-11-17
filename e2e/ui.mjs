@@ -42,6 +42,13 @@ const launchChrome = async () => {
     '--use-fake-device-for-media-stream',
     '--use-fake-ui-for-media-stream',
     '--autoplay-policy=no-user-gesture-required',
+    // Keep background tabs at full speed: the suite keeps several pages open
+    // for ~10 minutes and Chrome's freezing/throttling otherwise delays pushes
+    // to the hidden page and makes late steps time out.
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
     'about:blank',
   ], { stdio: 'ignore', windowsHide: true });
 

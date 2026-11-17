@@ -103,6 +103,13 @@ import type {
   UserProfile,
 } from '../sdk/types';
 
+/** True when the failure means the saved token is unusable (not a network blip). */
+const isAuthFailure = (err: unknown): boolean => {
+  const wrapped = wrapError(err);
+  if (wrapped.code === 100001 || wrapped.code === 100002 || wrapped.code === 100003) return true;
+  return /token|401|unauthorized|登录态/i.test(`${wrapped.detail} ${wrapped.message}`);
+};
+
 const SESSION_KEY = 'zim.session';
 const SYNC_KEY = 'zim.sync';
 const DEVICE_KEY = 'zim.device';
@@ -650,14 +657,43 @@ class ImStore {
     this.rest = new IMHttp({ baseUrl: saved.endpoint ?? '' });
     this.rest.setTokens({ accessToken: saved.accessToken, refreshToken: saved.refreshToken });
     try {
-      await this.enterWorkspace(saved.accessToken, saved.endpoint ?? '', saved.username ?? '');
-    } catch {
-      this.rest.clearTokens();
-      sessionStorage.removeItem(SESSION_KEY);
+      await this.enterWorkspaceWithRetry(saved.accessToken, saved.endpoint ?? '', saved.username ?? '');
+    } catch (err) {
       this.client?.close();
       this.client = null;
+      if (isAuthFailure(err)) {
+        // The token is gone or was kicked: the saved session is worthless.
+        this.rest.clearTokens();
+        sessionStorage.removeItem(SESSION_KEY);
+        this.set({ status: 'idle', connection: 'closed' });
+        return;
+      }
+      // A transient network failure must not destroy a valid session: keep the
+      // saved tokens so a retry (button or reload) can resume it.
       this.set({ status: 'idle', connection: 'closed' });
+      this.notify('网络异常，登录态已保留，请重试', 'error');
     }
+  }
+
+  /**
+   * Runs the workspace bootstrap, retrying transient failures.
+   *
+   * Auth failures are final (the token is dead); everything else is retried a
+   * few times so a flaky network does not send the user back to the login form.
+   */
+  private async enterWorkspaceWithRetry(token: string, endpoint: string, username: string): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await this.enterWorkspace(token, endpoint, username);
+        return;
+      } catch (err) {
+        lastError = err;
+        if (isAuthFailure(err)) throw err;
+        if (attempt < 2) await new Promise((resolve) => window.setTimeout(resolve, 600 * (attempt + 1)));
+      }
+    }
+    throw lastError;
   }
 
   private async enterWorkspace(token: string, endpoint: string, username: string): Promise<void> {

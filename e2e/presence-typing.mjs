@@ -16,6 +16,9 @@ const chrome = spawn('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe
   '--headless=new', '--remote-debugging-port=9811', `--user-data-dir=${profile}`,
   '--no-first-run', '--disable-gpu', '--ignore-certificate-errors',
   '--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
+  '--disable-background-timer-throttling', '--disable-backgrounding-occluded-windows',
+  '--disable-renderer-backgrounding',
+  '--disable-features=IntensiveWakeUpThrottling,CalculateNativeWinOcclusion',
   'about:blank',
 ], { stdio: 'ignore' });
 for (let i = 0; i < 60; i += 1) {
