@@ -171,6 +171,13 @@ const main = async () => {
   const errors = [];
 
   const alice = await browser.newPage();
+  const aliceLog = [];
+  alice.on('console', (msg) => {
+    const text = msg.text();
+    if (!text.startsWith('[zim]')) return;
+    aliceLog.push(text.slice(0, 160));
+    if (aliceLog.length > 40) aliceLog.shift();
+  });
   alice.on('pageerror', (err) => {
     errors.push(`alice pageerror: ${err.message}`);
     console.log('  alice pageerror:', String(err.message).slice(0, 200));
@@ -1432,7 +1439,9 @@ const main = async () => {
     hasStore: Boolean(window.__zim),
     status: window.__zim ? window.__zim.getSnapshot().status : 'none',
     conn: window.__zim ? window.__zim.getSnapshot().connection : 'none',
+    kick: window.__zimKick ?? null,
   }))));
+  console.log('  ui log:', JSON.stringify(aliceLog.slice(-14)));
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
   const cdp = await alice.createCDPSession();

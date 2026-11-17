@@ -143,10 +143,8 @@ await sleep(900);
 const groupCid = await alice.evaluate(() => window.__zim.getSnapshot().activeCid);
 const bobCid = await bob.evaluate(() => window.__zim.getSnapshot().activeCid);
 await bob.bringToFront();
-// A brand-new group has no conversation row until the first message, and the
-// server resolves typing through that row: send one first, then type.
-await bob.evaluate(async (name) => window.__zim.sendMessage(`group-ready ${name}`), group.name);
-await sleep(1500);
+// No message is sent first: typing must work on a brand-new group whose
+// conversation row does not exist yet (server falls back to the members).
 await typeInComposer(bob, 'hi group');
 await sleep(900);
 await alice.bringToFront();

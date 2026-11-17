@@ -3192,6 +3192,10 @@ class ImStore {
       4: '账号已被禁用',
     };
     const message = reasons[reason] ?? '已被强制下线';
+    if (import.meta.env.DEV) {
+      (window as unknown as { __zimKick?: unknown }).__zimKick = { reason, at: Date.now() };
+      console.debug(`[zim] kicked reason=${reason}`);
+    }
     // Leave a persistent note on the login screen: the toast disappears with the
     // workspace. logout() closes the socket so no reconnect fight follows.
     this.notify(message, 'error');
