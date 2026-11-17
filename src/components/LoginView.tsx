@@ -1,18 +1,32 @@
-import { useState, type FormEvent } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
 
 import { imStore, useIm } from '../app/store';
+import { loadLoginPrefs, saveLoginPrefs } from '../app/loginPrefs';
 
 type Mode = 'login' | 'register';
 
 /** Login / sign-up card. Registration returns tokens, so it enters the app directly. */
 export function LoginView() {
   const state = useIm();
+  // The last successful login is remembered locally: no hard-coded demo account.
+  const saved = useMemo(() => loadLoginPrefs(), []);
   const [mode, setMode] = useState<Mode>('login');
-  const [username, setUsername] = useState('alice');
-  const [password, setPassword] = useState('password');
+  const [username, setUsername] = useState(saved.username);
+  const [password, setPassword] = useState(saved.password);
+  const [remember, setRemember] = useState(saved.remember);
   const [nickname, setNickname] = useState('');
-  const [endpoint, setEndpoint] = useState(state.endpoint);
+  const [endpoint, setEndpoint] = useState(state.endpoint || saved.endpoint);
   const busy = state.status === 'authenticating';
+
+  const persist = (name: string, secret: string, rememberPassword: boolean, target: string) => {
+    const next = saveLoginPrefs({
+      username: name,
+      password: secret,
+      remember: rememberPassword,
+      endpoint: target.trim(),
+    });
+    setRemember(next.remember);
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -22,6 +36,7 @@ export function LoginView() {
       } else {
         await imStore.register(username, password, nickname, endpoint);
       }
+      persist(username, password, remember, endpoint);
     } catch {
       // The store already surfaced the reason through state.authError.
     }
@@ -29,15 +44,9 @@ export function LoginView() {
 
   const switchMode = (next: Mode) => {
     setMode(next);
-    if (next === 'register' && username === 'alice') {
-      setUsername('');
-      setPassword('');
-      setNickname('');
-    }
-    if (next === 'login' && username === '') {
-      setUsername('alice');
-      setPassword('password');
-    }
+    // Switching to sign-up must not send the saved password to a new account.
+    if (next === 'register') setPassword('');
+    else if (saved.username === username) setPassword(saved.password);
   };
 
   if (state.status === 'restoring') {
@@ -49,6 +58,7 @@ export function LoginView() {
   }
 
   const isRegister = mode === 'register';
+  const recent = saved.recent.filter((item) => item !== username);
 
   return (
     <div className="grid min-h-full place-items-center bg-slate-50 px-4 py-10 dark:bg-slate-950">
@@ -95,6 +105,22 @@ export function LoginView() {
             />
           </label>
 
+          {recent.length > 0 ? (
+            <div className="-mt-2 flex flex-wrap items-center gap-1 text-[11px] text-slate-500" data-recent-accounts>
+              <span>最近：</span>
+              {recent.map((name) => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => setUsername(name)}
+                  className="rounded-full border border-slate-200 px-2 py-0.5 hover:border-indigo-400 dark:border-slate-700"
+                >
+                  {name}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
           <label className="block">
             <span className="mb-1 block text-xs text-slate-500">密码</span>
             <input
@@ -135,6 +161,33 @@ export function LoginView() {
             </span>
           </label>
 
+          {!isRegister ? (
+            <label className="flex items-center gap-2 text-xs text-slate-500">
+              <input
+                type="checkbox"
+                checked={remember}
+                aria-label="记住密码"
+                data-remember-password
+                onChange={(event) => {
+                  const next = event.target.checked;
+                  setRemember(next);
+                  // Turning the option off only drops the password: the last
+                  // account (and the recent list) stay available.
+                  if (!next) {
+                    saveLoginPrefs({
+                      username: username || saved.username,
+                      password: '',
+                      remember: false,
+                      endpoint,
+                    });
+                  }
+                }}
+                className="h-3.5 w-3.5"
+              />
+              记住密码（保存在本机浏览器）
+            </label>
+          ) : null}
+
           {state.authError ? (
             <p role="alert" className="text-xs text-rose-600">
               {state.authError}
@@ -150,11 +203,13 @@ export function LoginView() {
           </button>
         </form>
 
-        <p className="mt-5 text-xs leading-relaxed text-slate-500">
-          开发种子账号：<code className="rounded bg-indigo-50 px-1 dark:bg-indigo-950">alice</code> /{' '}
-          <code className="rounded bg-indigo-50 px-1 dark:bg-indigo-950">bob</code>，密码{' '}
-          <code className="rounded bg-indigo-50 px-1 dark:bg-indigo-950">password</code>。
-        </p>
+        {import.meta.env.DEV ? (
+          <p className="mt-5 text-xs leading-relaxed text-slate-500">
+            开发种子账号：<code className="rounded bg-indigo-50 px-1 dark:bg-indigo-950">alice</code> /{' '}
+            <code className="rounded bg-indigo-50 px-1 dark:bg-indigo-950">bob</code>，密码{' '}
+            <code className="rounded bg-indigo-50 px-1 dark:bg-indigo-950">password</code>。
+          </p>
+        ) : null}
       </div>
     </div>
   );
