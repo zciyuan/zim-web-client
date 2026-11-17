@@ -820,7 +820,7 @@ function Sidebar() {
                     <Avatar name={name} seed={uid} />
                     <button type="button" className="min-w-0 flex-1 text-left" onClick={() => imStore.openFriend(friend)}>
                       <span className="flex items-baseline gap-1 truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">
-                        {name}
+                        <span data-row-title className="truncate">{name}</span>
                         {friend.pinned ? <span className="rounded border border-indigo-400 px-1 text-[10px] text-indigo-500">置顶</span> : null}
                       </span>
                       <span className="block text-xs text-slate-500">uid {uid}</span>
