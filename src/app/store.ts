@@ -2892,13 +2892,35 @@ class ImStore {
     }
   }
 
-  /** Requests the mic before joining (mobile audio sessions need it early). */
-  private async prepareMicrophone(): Promise<void> {
+  /**
+   * Asks the device for microphone (and camera for video calls) before any
+   * invite/answer/join happens, so a denied permission never creates a room or
+   * a ringing call. Tracks are stopped right away: LiveKit re-opens them when
+   * it publishes.
+   */
+  private async ensureMediaPermissions(video: boolean): Promise<boolean> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this.notify('当前浏览器不支持麦克风/摄像头', 'error');
+      return false;
+    }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
       stream.getTracks().forEach((track) => track.stop());
-    } catch {
-      this.notify('无法访问麦克风，对方将听不到你的声音', 'error');
+      return true;
+    } catch (err) {
+      const name = (err as { name?: string })?.name ?? '';
+      let detail: string;
+      if (name === 'NotAllowedError' || name === 'SecurityError') {
+        detail = `${video ? '麦克风和摄像头' : '麦克风'}权限被拒绝：请在地址栏的站点设置里允许后重试`;
+      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
+        detail = video ? '未检测到可用的麦克风或摄像头' : '未检测到可用的麦克风';
+      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
+        detail = '麦克风/摄像头被其他应用占用，关闭后重试';
+      } else {
+        detail = `无法访问${video ? '麦克风/摄像头' : '麦克风'}，请检查系统权限`;
+      }
+      this.notify(detail, 'error');
+      return false;
     }
   }
 
@@ -3146,6 +3168,9 @@ class ImStore {
       this.notify(`无法呼叫：${support.detail}`, 'error');
       return;
     }
+    // Ask for the mic/camera first: a denied permission must not create a room
+    // or ring the other side.
+    if (!(await this.ensureMediaPermissions(media === 2))) return;
     const callId = randomId();
     const isGroup = conversation.type === 2;
     const targetType: 1 | 2 = isGroup ? 2 : 1;
@@ -3241,6 +3266,9 @@ class ImStore {
       this.notify(`无法接听：${support.detail}`, 'error');
       return;
     }
+    // Permission first: answering without a mic would leave the caller hearing
+    // silence. Denial keeps the sheet ringing so the user can grant and retry.
+    if (!(await this.ensureMediaPermissions(call.media === 2))) return;
     this.set({ call: { ...call, phase: 'connecting' } });
     this.clearCallTimers();
     this.armConnectTimer();
@@ -3251,9 +3279,6 @@ class ImStore {
         decodeCallAnswer,
       );
       if (import.meta.env.DEV) console.debug('[zim] call answered, attaching media');
-      // Ask for the microphone before joining so the first frames are not silent
-      // and the user sees the permission prompt while the call is still ringing.
-      await this.prepareMicrophone();
       if (answer.payload.token && answer.payload.sfu_url) {
         await this.connectRoom({
           callId: call.callId,
@@ -3494,6 +3519,8 @@ class ImStore {
     }
     const room = this.state.groupCalls[groupId];
     const targetType: CallTargetType = room?.targetType ?? (this.groupTypeOf(groupId) === 3 ? 3 : 2);
+    // Ask for the mic/camera before joining the SFU.
+    if (!(await this.ensureMediaPermissions((room?.media ?? 1) === 2))) return;
     const selfUid = String(this.state.me?.uid ?? '');
     this.set({
       call: {
