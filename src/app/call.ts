@@ -11,6 +11,7 @@ export interface CallTrackHandlers {
   /** identity -> attached <video> element (group calls keep one per peer). */
   onRemoteTracks?: (tracks: Map<string, HTMLVideoElement>) => void;
   /** a remote participant left the room (1:1 calls end here). */
+  onParticipantJoined?: (identity: string) => void;
   onParticipantLeft?: (identity: string) => void;
   /** the room dropped for good (media/connection lost). */
   onDisconnected?: () => void;
@@ -83,6 +84,9 @@ export class CallSession {
       track.detach().forEach((element) => element.remove());
     });
 
+    room.on(RoomEvent.ParticipantConnected, (participant) => {
+      this.handlers.onParticipantJoined?.(participant.identity);
+    });
     room.on(RoomEvent.ParticipantDisconnected, (participant) => {
       this.handlers.onParticipantLeft?.(participant.identity);
     });

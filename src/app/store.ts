@@ -2962,6 +2962,29 @@ class ImStore {
         if (this.state.call.callId !== callId) return;
         this.set({ call: { ...this.state.call, speaking: uids } });
       },
+      onParticipantJoined: (identity) => {
+        const call = this.state.call;
+        if (call.callId !== callId) return;
+        // The answered push can be lost (the callee already knows it accepted).
+        // Once the peer is actually in the room, the call is live: promote it
+        // instead of leaving the caller stuck on "正在呼叫".
+        if (call.phase === 'outgoing' || call.phase === 'connecting') {
+          this.clearCallTimers();
+          this.notify('通话已接通');
+          this.set({
+            call: {
+              ...call,
+              phase: 'active',
+              startedAt: call.startedAt || Date.now(),
+              participants: Array.from(new Set([...call.participants, identity])),
+            },
+          });
+          return;
+        }
+        if (!call.participants.includes(identity)) {
+          this.set({ call: { ...call, participants: [...call.participants, identity] } });
+        }
+      },
       onParticipantLeft: () => {
         const call = this.state.call;
         // In a 1:1 call the other side leaving means the call is over; in a
