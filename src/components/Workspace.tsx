@@ -8,6 +8,16 @@ import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
 import { atOf, formatClock, formatListTime, mentionsInBrief, mentionsInUnread, messagePreview, messageText, previewConversation } from '../app/format';
 
+type ConversationRow = ReturnType<typeof imStore.getSnapshot>['conversations'][number];
+
+/** Active persistent room of a group conversation (badge source). */
+const groupCallOf = (conversation: ConversationRow) => {
+  if (conversation.type !== 2) return undefined;
+  const cid = String(conversation.conversation_id ?? '');
+  const gid = cid.startsWith('g_') ? cid.slice(2) : String(conversation.group_id ?? '');
+  return gid && gid !== '0' ? imStore.getSnapshot().groupCalls[gid] : undefined;
+};
+
 const TABS: { key: Tab; icon: string; label: string }[] = [
   { key: 'conversations', icon: '💬', label: '会话' },
   { key: 'unread', icon: '🔔', label: '未读' },
@@ -622,6 +632,15 @@ function Sidebar() {
                             <span className="min-w-0 flex-1">
                               <span className="flex items-baseline justify-between gap-2">
                                 <span data-row-title className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
+                                {groupCallOf(conversation) ? (
+                                  <span
+                                    data-group-call-badge={conversation.conversation_id}
+                                    data-group-call-media={groupCallOf(conversation)?.media}
+                                    className="shrink-0 rounded-full bg-emerald-500 px-1.5 text-[10px] font-medium text-white"
+                                  >
+                                    {groupCallOf(conversation)?.media === 2 ? '视频中' : '语音中'}
+                                  </span>
+                                ) : null}
                                 <span className="shrink-0 text-[11px] text-slate-400">{formatListTime(conversation.last_msg_at)}</span>
                               </span>
                               <span className="mt-0.5 flex items-center gap-1 text-xs text-slate-500">
@@ -716,6 +735,15 @@ function Sidebar() {
                         >
                           {name}
                         </span>
+                        {groupCallOf(conversation) ? (
+                          <span
+                            data-group-call-badge={conversation.conversation_id}
+                            data-group-call-media={groupCallOf(conversation)?.media}
+                            className="shrink-0 rounded-full bg-emerald-500 px-1.5 text-[10px] font-medium text-white"
+                          >
+                            {groupCallOf(conversation)?.media === 2 ? '视频中' : '语音中'}
+                          </span>
+                        ) : null}
                         <span className="shrink-0 text-[11px] text-slate-400">
                           {formatListTime(conversation.last_msg_at)}
                         </span>

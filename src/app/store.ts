@@ -50,15 +50,19 @@ import {
 } from '../sdk/sync';
 import {
   decodeCallAnswer,
+  decodeCallHangupRes,
   decodeCallInviteRes,
+  decodeCallStateRes,
   decodeRoomTokenRes,
   encodeCallAnswerReq,
   encodeCallCancelReq,
   encodeCallHangupReq,
   encodeCallInviteReq,
+  encodeCallStateReq,
   encodeParticipantStateReq,
   encodeRoomTokenReq,
   type CallAnswerPush,
+  type CallStateResult,
 } from '../sdk/rtc';
 import { GROUP_EVENT, decodeGroupEvent, type GroupEvent } from '../sdk/groups';
 import { callSession } from './call';
@@ -207,6 +211,8 @@ export interface ImState {
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
   call: CallStatus;
+  /** group id -> the persistent voice/video room currently open for that group */
+  groupCalls: Record<string, GroupCallRoom>;
   /** last RTC failure, kept for diagnostics */
   lastCallError: string;
   me: Me | null;
@@ -252,6 +258,7 @@ const initialState: ImState = {
   kickedLoop: false,
   quoteTarget: null,
   call: emptyCall(),
+  groupCalls: {},
   lastCallError: '',
   me: null,
   endpoint: savedEndpoint(),
@@ -349,8 +356,12 @@ export interface CallStatus {
   media: 1 | 2;
   /** 1 direct / 2 group */
   targetType: 1 | 2;
+  /** group rooms: the group this call belongs to */
+  groupId: string;
   /** group calls: another member already joined */
   joinedElsewhere: boolean;
+  /** this client already attached its media session to the room */
+  joined: boolean;
   /** group calls: identities currently in the SFU room */
   participants: string[];
   /** group calls: identities currently speaking */
@@ -366,9 +377,20 @@ export interface CallStatus {
 
 function emptyCall(): CallStatus {
   return {
-    phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [], speaking: [],
+    phase: 'idle', callId: '', media: 1, targetType: 1, groupId: '', joinedElsewhere: false, joined: false, participants: [], speaking: [],
     peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
   };
+}
+
+/** A normal group's persistent voice/video room (target_type=2). */
+export interface GroupCallRoom {
+  callId: string;
+  media: 1 | 2;
+  active: boolean;
+  /** uids the server reports as participants (best effort). */
+  participants: string[];
+  room: string;
+  startedAt: number;
 }
 
 const emptyThread = (): Thread => ({
@@ -393,6 +415,10 @@ class ImStore {
   private presenceWatched = new Set<string>();
   /** Re-subscribe timer while the page is visible (WS subscription TTL is 2min). */
   private presenceTimer: number | null = null;
+  /** Group rooms: 1807 heartbeat while the user stays in the SFU room. */
+  private groupHeartbeatTimer: number | null = null;
+  /** Group rooms: best-effort 1803 when the tab goes away. */
+  private unloadLeaveHandler: (() => void) | null = null;
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
@@ -894,6 +920,13 @@ class ImStore {
     this.set({ activeCid: cid, tab: this.state.tab === 'friends' || this.state.tab === 'groups' ? 'conversations' : this.state.tab });
     const conversation = this.conversation(cid);
     if (!conversation) return;
+
+    // Group rooms are persistent: opening the group asks the server whether a
+    // call is running so the "join" entry appears without waiting for a push.
+    if (conversation.type === 2) {
+      const gid = cid.startsWith('g_') ? cid.slice(2) : String(conversation.group_id ?? '');
+      if (gid && gid !== '0') void this.refreshGroupCall(gid);
+    }
 
     // Remember where the unread block starts before markRead clears it.
     const anchor = Number(conversation.read_seq ?? 0);
@@ -2620,6 +2653,11 @@ class ImStore {
       this.handleCallPush(event.payload);
       return;
     }
+    if (event.opcode === OP.CALL_STATE) {
+      // 1805: a normal group's persistent room started or ended.
+      this.handleGroupCallState(event.payload);
+      return;
+    }
     if (event.opcode === OP.PUSH_FRIEND) {
       const update = decodeFriendEventPush(event.payload);
       if (update.kind === 1 && String(update.to_uid) === String(this.state.me?.uid ?? '')) {
@@ -2898,6 +2936,9 @@ class ImStore {
     if (import.meta.env.DEV) console.debug(`[zim] call push phase=${update.phase} target=${update.target_type} media=${update.media}`);
     switch (update.phase) {
       case 1:
+        // Normal groups are persistent rooms: 1805 carries their state and no
+        // member ever gets a ringing sheet, so ignore a stray group phase=1.
+        if (update.target_type === 2) return;
         // Ringing: the callee shows the incoming call sheet. A second call while
         // one is already live must not hijack the sheet: reject it right away.
         if (this.state.call.phase !== 'idle') {
@@ -2915,7 +2956,9 @@ class ImStore {
             callId: update.call_id,
             media: update.media === 2 ? 2 : 1,
             targetType: update.target_type === 2 ? 2 : 1,
+            groupId: update.target_type === 2 ? String(update.from_uid) : '',
             joinedElsewhere: false,
+            joined: false,
             participants: [],
             speaking: [],
             peerId: update.from_uid,
@@ -2953,6 +2996,14 @@ class ImStore {
               startedAt: this.state.call.startedAt || Date.now(),
             },
           });
+          // The caller joined no room while ringing: attach the media session
+          // now that the server accepts tokens for an answered call.
+          if (!this.state.call.joined) {
+            void this.joinCallRoom(update.call_id, this.state.call.media === 2).catch((err) => {
+              this.notify(`加入通话失败：${wrapError(err).display}`, 'error');
+              void this.endCall('error');
+            });
+          }
         }
         break;
       case 3:
@@ -3006,13 +3057,20 @@ class ImStore {
       return;
     }
     const peer = isGroup ? this.groupName(peerId) : this.friendProfile(peerId);
+    if (isGroup) {
+      // Normal groups are persistent rooms: create and join in one step.
+      await this.startGroupCall(media, peerId, peer);
+      return;
+    }
     this.set({
       call: {
         phase: 'outgoing',
         callId,
         media,
         targetType,
+        groupId: '',
         joinedElsewhere: false,
+        joined: false,
         participants: this.state.me ? [String(this.state.me.uid)] : [],
         speaking: [],
         peerId,
@@ -3035,9 +3093,8 @@ class ImStore {
         decodeCallInviteRes,
       );
       this.set({ call: { ...this.state.call, room: res.payload.room } });
-      await this.joinCallRoom(callId, media === 2);
-      // Joined the SFU while still ringing: the ring timer keeps running, the
-      // connect timer must not end the call before someone answers.
+      // A ringing 1:1 call has no joinable room yet (the server only issues a
+      // token once it is answered): wait for phase=2 and join from there.
       this.clearConnectTimer();
     } catch (err) {
       const wrapped = wrapError(err);
@@ -3114,7 +3171,7 @@ class ImStore {
     await this.endCall('cancelled');
   }
 
-  /** Hangs up an active call (or cancels a ringing one). */
+  /** Hangs up an active call (or leaves a group room / cancels a ringing one). */
   async hangupCall(): Promise<void> {
     const call = this.state.call;
     if (import.meta.env.DEV) console.debug(`[zim] call hangup requested phase=${call.phase}`);
@@ -3124,6 +3181,11 @@ class ImStore {
     }
     if (call.phase === 'outgoing') {
       await this.cancelCall();
+      return;
+    }
+    // Group rooms: leaving only removes this member; the last leaver ends it.
+    if (call.targetType === 2 && this.client && (call.phase === 'active' || call.phase === 'connecting')) {
+      await this.leaveGroupCall();
       return;
     }
     if (!this.client || (call.phase !== 'active' && call.phase !== 'connecting')) return;
@@ -3138,6 +3200,280 @@ class ImStore {
       // local teardown still runs
     }
     await this.endCall('hangup');
+  }
+
+  // ------------------------------------------------------------ group rooms --
+
+  /**
+   * Starts a normal group's persistent room (1801, target.type=2).
+   *
+   * The invite response already carries a join token: there is no ringing phase
+   * and no callee to wait for, so the caller enters the SFU immediately.
+   */
+  private async startGroupCall(media: 1 | 2, groupId: string, groupName: string): Promise<void> {
+    if (!this.client) return;
+    const callId = randomId();
+    const selfUid = String(this.state.me?.uid ?? '');
+    this.set({
+      call: {
+        ...emptyCall(),
+        phase: 'connecting',
+        callId,
+        media,
+        targetType: 2,
+        groupId,
+        participants: selfUid ? [selfUid] : [],
+        peerId: groupId,
+        peerName: groupName,
+        videoOn: media === 2,
+      },
+    });
+    try {
+      const res = await this.client.request(
+        OP.CALL_INVITE,
+        encodeCallInviteReq({ callId, targetType: 2, targetId: groupId, media }),
+        decodeCallInviteRes,
+      );
+      const payload = res.payload;
+      this.setGroupRoom(groupId, {
+        callId: payload.call_id,
+        media: payload.media === 2 ? 2 : media,
+        active: true,
+        participants: payload.participants,
+        room: payload.room,
+        startedAt: Date.now(),
+      });
+      this.set({
+        call: {
+          ...this.state.call,
+          callId: payload.call_id,
+          room: payload.room,
+          participants: Array.from(new Set([selfUid, ...payload.participants].filter(Boolean))),
+        },
+      });
+      await this.connectRoom({
+        callId: payload.call_id,
+        token: payload.token,
+        sfuUrl: payload.sfu_url,
+        video: (payload.media === 2 || media === 2),
+      });
+    } catch (err) {
+      const wrapped = wrapError(err);
+      if (wrapped.code === 180011) {
+        // The group already has a room: query it and join instead of retrying.
+        this.notify('该群正在通话中，正在加入');
+        await this.endCall('error');
+        await this.refreshGroupCall(groupId);
+        await this.joinGroupCall(groupId);
+        return;
+      }
+      this.notify(
+        wrapped.code === 130002 ? '你不是该群成员' : `发起失败：${explainRtcError(wrapped.display)}`,
+        'error',
+      );
+      await this.endCall('error');
+    }
+  }
+
+  /** Joins the active room of a group (1806 with the group id). */
+  async joinGroupCall(groupId: string, callId = ''): Promise<void> {
+    if (!groupId) return;
+    if (this.state.call.phase !== 'idle') {
+      if (this.state.call.targetType === 2 && this.state.call.groupId === groupId) return;
+      this.notify('你正在通话中', 'error');
+      return;
+    }
+    const support = detectRtcSupport();
+    if (!support.supported) {
+      this.notify(`无法加入：${support.detail}`, 'error');
+      return;
+    }
+    const selfUid = String(this.state.me?.uid ?? '');
+    this.set({
+      call: {
+        ...emptyCall(),
+        phase: 'connecting',
+        callId,
+        targetType: 2,
+        groupId,
+        participants: selfUid ? [selfUid] : [],
+        peerId: groupId,
+        peerName: this.groupName(groupId),
+      },
+    });
+    try {
+      const res = await this.client!.request(
+        OP.ROOM_TOKEN,
+        encodeRoomTokenReq({ callId, groupId }),
+        decodeRoomTokenRes,
+      );
+      const payload = res.payload;
+      const media: 1 | 2 = payload.media === 2 ? 2 : 1;
+      this.setGroupRoom(groupId, {
+        callId: payload.call_id,
+        media,
+        active: true,
+        participants: payload.participants,
+        room: payload.room,
+        startedAt: Date.now(),
+      });
+      this.set({
+        call: {
+          ...this.state.call,
+          callId: payload.call_id,
+          media,
+          room: payload.room,
+          videoOn: media === 2,
+          participants: Array.from(new Set([selfUid, ...payload.participants].filter(Boolean))),
+        },
+      });
+      await this.connectRoom({
+        callId: payload.call_id,
+        token: payload.token,
+        sfuUrl: payload.sfu_url,
+        video: media === 2,
+      });
+    } catch (err) {
+      const wrapped = wrapError(err);
+      if (wrapped.code === 180003 || wrapped.code === 180004) {
+        this.notify('通话已结束');
+        this.clearGroupRoom(groupId);
+      } else if (wrapped.code === 180008) {
+        this.notify('通话人数已满', 'error');
+      } else if (wrapped.code === 130002) {
+        this.notify('你不是该群成员', 'error');
+        this.clearGroupRoom(groupId);
+      } else {
+        this.notify(`加入失败：${explainRtcError(wrapped.display)}`, 'error');
+      }
+      await this.endCall('error');
+    }
+  }
+
+  /** Leaves the current group room (1803): only the last participant ends it. */
+  private async leaveGroupCall(): Promise<void> {
+    const call = this.state.call;
+    const duration = call.startedAt > 0 ? Math.round((Date.now() - call.startedAt) / 1000) : 0;
+    let ended = false;
+    try {
+      const res = await this.client?.request(
+        OP.CALL_HANGUP,
+        encodeCallHangupReq({ callId: call.callId, reason: 1, duration }),
+        decodeCallHangupRes,
+      );
+      ended = Boolean(res?.payload.ended);
+    } catch (err) {
+      // 180003 means the room is already gone: treat it as ended.
+      ended = wrapError(err).code === 180003;
+    }
+    await this.endCall('hangup');
+    if (ended) {
+      this.clearGroupRoom(call.groupId);
+      return;
+    }
+    // The room stays open: drop ourselves from the cached roster so the banner
+    // count does not keep counting a member who just left.
+    const room = this.state.groupCalls[call.groupId];
+    if (room) {
+      const selfUid = String(this.state.me?.uid ?? '');
+      this.setGroupRoom(call.groupId, {
+        ...room,
+        participants: room.participants.filter((uid) => uid !== selfUid),
+      });
+    }
+  }
+
+  /** Queries a group's active room (1805 by group id). */
+  async refreshGroupCall(groupId: string): Promise<void> {
+    if (!this.client || !groupId) return;
+    try {
+      const res = await this.client.request(
+        OP.CALL_STATE,
+        encodeCallStateReq({ groupId }),
+        decodeCallStateRes,
+      );
+      this.applyGroupCallState(res.payload);
+    } catch {
+      // transient: the next visit or push retries
+    }
+  }
+
+  /** Applies a 1805 push (state changes of a group room). */
+  private handleGroupCallState(payload: Uint8Array): void {
+    try {
+      this.applyGroupCallState(decodeCallStateRes(payload));
+    } catch {
+      // malformed frame: ignore
+    }
+  }
+
+  private applyGroupCallState(state: CallStateResult): void {
+    const groupId = state.group_id && state.group_id !== '0' ? state.group_id : '';
+    if (!groupId || state.target_type === 1) return;
+    const active = Boolean(state.active) && state.call_id !== '';
+    if (!active) {
+      this.clearGroupRoom(groupId);
+      const call = this.state.call;
+      if (call.phase !== 'idle' && call.targetType === 2 && call.groupId === groupId) {
+        this.notify('通话已结束');
+        void this.endCall('remote');
+      }
+      return;
+    }
+    const media: 1 | 2 = state.media === 2 ? 2 : 1;
+    this.setGroupRoom(groupId, {
+      callId: state.call_id,
+      media,
+      active: true,
+      participants: state.participants,
+      room: state.room,
+      startedAt: Number(state.started_at) || Date.now(),
+    });
+  }
+
+  private setGroupRoom(groupId: string, room: GroupCallRoom): void {
+    if (!groupId || !room.callId) return;
+    this.set({ groupCalls: { ...this.state.groupCalls, [groupId]: room } });
+  }
+
+  private clearGroupRoom(groupId: string): void {
+    if (!groupId || !this.state.groupCalls[groupId]) return;
+    const next = { ...this.state.groupCalls };
+    delete next[groupId];
+    this.set({ groupCalls: next });
+  }
+
+  private startGroupHeartbeat(): void {
+    this.stopGroupHeartbeat();
+    void this.reportParticipantState();
+    this.groupHeartbeatTimer = window.setInterval(() => void this.reportParticipantState(), 30_000);
+  }
+
+  private stopGroupHeartbeat(): void {
+    if (this.groupHeartbeatTimer !== null) {
+      window.clearInterval(this.groupHeartbeatTimer);
+      this.groupHeartbeatTimer = null;
+    }
+  }
+
+  /** Best-effort leave when the page is closed (the socket may die first). */
+  private armUnloadLeave(): void {
+    this.disarmUnloadLeave();
+    const handler = () => {
+      const call = this.state.call;
+      if (call.phase === 'idle' || call.targetType !== 2 || !call.callId) return;
+      void this.client
+        ?.request(OP.CALL_HANGUP, encodeCallHangupReq({ callId: call.callId, reason: 1, duration: 0 }), decodeCallHangupRes)
+        .catch(() => undefined);
+    };
+    this.unloadLeaveHandler = handler;
+    window.addEventListener('pagehide', handler);
+  }
+
+  private disarmUnloadLeave(): void {
+    if (!this.unloadLeaveHandler) return;
+    window.removeEventListener('pagehide', this.unloadLeaveHandler);
+    this.unloadLeaveHandler = null;
   }
 
   /** Toggles the microphone and reports participant state (1807). */
@@ -3165,7 +3501,7 @@ class ImStore {
     if (!this.client || !call.callId || !this.state.me) return;
     await this.client
       .request(
-        OP.CALL_STATE,
+        OP.CALL_PARTICIPANT,
         encodeParticipantStateReq({
           callId: call.callId,
           uid: this.state.me.uid,
@@ -3187,6 +3523,12 @@ class ImStore {
     );
     const { token, sfu_url: sfuUrl } = res.payload;
     if (import.meta.env.DEV) console.debug(`[zim] call room token ok sfu=${sfuUrl} token=${token ? 'yes' : 'no'}`);
+    await this.connectRoom({ callId, token, sfuUrl, video });
+  }
+
+  /** Attaches the media session with a ready token (1:1 answers and group rooms). */
+  private async connectRoom(opts: { callId: string; token: string; sfuUrl: string; video: boolean }): Promise<void> {
+    const { callId, token, sfuUrl, video } = opts;
     if (!token || !sfuUrl) throw new Error('SFU 未就绪');
     callSession.onTrack({
       onSpeakers: (uids) => {
@@ -3256,17 +3598,36 @@ class ImStore {
     });
     await callSession.connect(sfuUrlFor(sfuUrl), token, video);
     if (import.meta.env.DEV) console.debug('[zim] call media connected');
+    if (this.state.call.callId === callId && this.state.call.phase === 'idle') return;
+    // Group rooms are persistent: the call is active as soon as media is up and
+    // keeps its heartbeat. A 1:1 call stays "outgoing"/"connecting" until the
+    // peer answers (phase=2 push or the peer's participant-joined event).
+    if (this.state.call.callId === callId && this.state.call.targetType === 2) {
+      this.set({
+        call: {
+          ...this.state.call,
+          phase: 'active',
+          joined: true,
+          startedAt: this.state.call.startedAt || Date.now(),
+          participants: Array.from(new Set([
+            String(this.state.me?.uid ?? ''),
+            ...this.state.call.participants,
+          ].filter(Boolean))),
+        },
+      });
+      if (this.state.call.targetType === 2) {
+        this.startGroupHeartbeat();
+        this.armUnloadLeave();
+      }
+    }
   }
 
   private async endCall(_reason: string): Promise<void> {
     this.clearCallTimers();
+    this.stopGroupHeartbeat();
+    this.disarmUnloadLeave();
     await callSession.end().catch(() => undefined);
-    this.set({
-      call: {
-        phase: 'idle', callId: '', media: 1, targetType: 1, joinedElsewhere: false, participants: [], speaking: [],
-        peerId: '', peerName: '', room: '', startedAt: 0, muted: false, videoOn: true, error: '',
-      },
-    });
+    this.set({ call: emptyCall() });
   }
 
   private friendProfile(uid: string): string {

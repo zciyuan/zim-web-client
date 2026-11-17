@@ -152,6 +152,28 @@ export function CallOverlay() {
             <div className="h-full w-full">
               {remoteTracks[0] ? <VideoHost element={remoteTracks[0].element} /> : null}
             </div>
+          ) : isGroup ? (
+            // Persistent voice room: one avatar per member, highlighted while
+            // speaking (a single group tile would hide the roster completely).
+            <div className="flex h-full w-full flex-wrap items-center justify-center gap-3 p-3">
+              {tiles.map((tile) => (
+                <div
+                  key={tile.uid}
+                  data-voice-tile={tile.uid}
+                  data-speaking={call.speaking.includes(tile.uid) ? 'true' : 'false'}
+                  className={`flex w-24 flex-col items-center gap-1.5 rounded-2xl border px-2 py-3 transition ${
+                    call.speaking.includes(tile.uid)
+                      ? 'border-emerald-400 bg-emerald-500/10 ring-2 ring-emerald-400/50'
+                      : 'border-slate-800 bg-slate-900'
+                  }`}
+                >
+                  <Avatar name={imStore.senderName(tile.uid)} seed={tile.uid} size={40} />
+                  <span className="w-full truncate text-center text-[11px] text-slate-300">
+                    {imStore.senderName(tile.uid)}
+                  </span>
+                </div>
+              ))}
+            </div>
           ) : (
             <div className="flex flex-col items-center gap-3">
               <Avatar name={call.peerName} seed={call.peerId} size={72} />
@@ -227,7 +249,7 @@ export function CallOverlay() {
                 onClick={() => void imStore.hangupCall()}
                 className="rounded-full bg-rose-600 px-5 py-2 text-sm font-medium text-white"
               >
-                {call.phase === 'outgoing' ? '取消' : '挂断'}
+                {call.phase === 'outgoing' ? '取消' : isGroup ? '退出' : '挂断'}
               </button>
             </>
           )}

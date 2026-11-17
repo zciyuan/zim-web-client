@@ -4,7 +4,7 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
-import { atOf, attachmentOf, formatBytes, formatDuration, mentionsUser, mergeOf, quoteOf, uploadOf } from '../app/format';
+import { atOf, attachmentOf, formatBytes, formatDuration, groupCallCard, mentionsUser, mergeOf, quoteOf, uploadOf } from '../app/format';
 import { daySeparator, formatClock, imageOf, messageText } from '../app/format';
 
 const REACTION_EMOJIS = ['👍', '❤️', '😂', '🎉', '😮', '🙏'];
@@ -91,6 +91,7 @@ function Bubble({
   canRetryUpload,
   onRetryUpload,
   highlight,
+  groupId,
 }: {
   message: UiMessage;
   mine: boolean;
@@ -106,12 +107,15 @@ function Bubble({
   canRetryUpload?: boolean;
   onRetryUpload?: () => void;
   highlight?: string;
+  /** group id for the persistent-room card's join button */
+  groupId?: string;
 }) {
   const image = message.msg_type === 2 ? imageOf(message.content) : null;
   const attachment = message.msg_type >= 3 && message.msg_type <= 5 ? attachmentOf(message.content) : null;
   const { text, system } = messageText(message.content, message.msg_type);
   const quote = quoteOf(message.content);
   const merge = mergeOf(message.content);
+  const callCard = message.msg_type === 22 ? groupCallCard(message.content) : null;
   const state = message.localState ?? 'sent';
   // Long-press opens the same menu as right-click on touch devices.
   const pressTimer = useRef<number | null>(null);
@@ -305,6 +309,44 @@ function Bubble({
                 </span>
               </a>
             )}
+          </div>
+        ) : callCard ? (
+          <div
+            data-group-call-card={callCard.status}
+            data-group-call-media={callCard.media}
+            className={`w-60 rounded-2xl border px-3 py-2 ${
+              callCard.status === 'ongoing'
+                ? 'border-emerald-300 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950/60'
+                : 'border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800'
+            }`}
+          >
+            <div className="flex items-center gap-2 text-sm font-medium">
+              <span aria-hidden>{callCard.media === 2 ? '📹' : '📞'}</span>
+              <span>{callCard.media === 2 ? '群视频通话' : '群语音通话'}</span>
+              <span
+                data-group-call-card-state={callCard.status}
+                className={`ml-auto rounded-full px-1.5 py-0.5 text-[10px] ${
+                  callCard.status === 'ongoing'
+                    ? 'bg-emerald-500 text-white'
+                    : 'bg-slate-200 text-slate-600 dark:bg-slate-700 dark:text-slate-300'
+                }`}
+              >
+                {callCard.status === 'ongoing' ? '进行中' : '已结束'}
+              </span>
+            </div>
+            <p className="mt-1 text-[11px] text-slate-500">
+              {callCard.status === 'ongoing' ? '点击加入该群通话' : callCard.duration > 0 ? `时长 ${formatDuration(callCard.duration)}` : '通话已结束'}
+            </p>
+            {callCard.status === 'ongoing' && groupId ? (
+              <button
+                type="button"
+                data-join-group-call
+                onClick={() => void imStore.joinGroupCall(groupId, callCard.callId)}
+                className="mt-1.5 w-full rounded-lg bg-emerald-600 px-2 py-1 text-xs font-medium text-white hover:bg-emerald-500"
+              >
+                加入通话
+              </button>
+            ) : null}
           </div>
         ) : (
           <div
@@ -913,6 +955,18 @@ export function ChatPanel() {
   }
 
   const title = imStore.conversationTitle(conversation);
+  const gid = isGroup
+    ? String(
+      conversation?.conversation_id?.startsWith('g_')
+        ? conversation.conversation_id.slice(2)
+        : conversation?.group_id ?? '',
+    )
+    : '';
+  const groupRoom = gid && gid !== '0' ? state.groupCalls[gid] : undefined;
+  const call = state.call;
+  const inGroupRoom = Boolean(
+    groupRoom && call.phase !== 'idle' && call.targetType === 2 && call.groupId === gid,
+  );
   const typingEntry = state.typing[conversation?.conversation_id ?? ''];
   const typingUntil = typingEntry?.until ?? 0;
   const typing = typingUntil > Date.now();
@@ -1051,6 +1105,42 @@ export function ChatPanel() {
           ) : null}
         </div>
       </header>
+
+      {isGroup && groupRoom ? (
+        <div
+          data-group-call={groupRoom.callId}
+          data-group-call-media={groupRoom.media}
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/50 dark:text-emerald-200"
+        >
+          <span className="flex min-w-0 items-center gap-1.5" data-group-call-state={inGroupRoom ? 'joined' : 'ongoing'}>
+            <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-500" />
+            <span className="truncate">
+              {groupRoom.media === 2 ? '群视频通话中' : '群语音通话中'}
+              　
+              {inGroupRoom ? call.participants.length : Math.max(groupRoom.participants.length, 1)} 人
+            </span>
+          </span>
+          {inGroupRoom ? (
+            <button
+              type="button"
+              data-group-call-action="leave"
+              onClick={() => void imStore.hangupCall()}
+              className="rounded-lg border border-rose-300 px-2 py-0.5 text-rose-600 dark:border-rose-800 dark:text-rose-300"
+            >
+              退出通话
+            </button>
+          ) : (
+            <button
+              type="button"
+              data-group-call-action="join"
+              onClick={() => void imStore.joinGroupCall(groupRoom.callId.startsWith('g_') ? groupRoom.callId : gid ?? '')}
+              className="rounded-lg border border-emerald-400 px-2 py-0.5 font-medium hover:bg-emerald-100 dark:hover:bg-emerald-900"
+            >
+              加入通话
+            </button>
+          )}
+        </div>
+      ) : null}
 
       {searchOpen ? (
         <div className="border-b border-slate-200 bg-white px-4 py-2 dark:border-slate-800 dark:bg-slate-900">
@@ -1219,6 +1309,7 @@ export function ChatPanel() {
                 canRetryUpload={state.uploadRetries.includes(message.client_msg_id)}
                 onRetryUpload={() => void imStore.retryUpload(message.client_msg_id)}
                 highlight={state.searchHighlight || undefined}
+                groupId={isGroup ? gid : ''}
                   selectable={selectMode}
                   selected={selectedIds.includes(message.server_msg_id)}
                   onSelect={() => {

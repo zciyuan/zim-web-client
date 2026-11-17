@@ -33,6 +33,44 @@ const parseContent = (raw: string): Record<string, unknown> | null => {
 /** Exported for the renderer: image/file payloads are JSON objects. */
 export const parseMessageContent = parseContent;
 
+/** A normal group's msg_type=22 card with a live status (ongoing/ended). */
+export interface GroupCallCard {
+  status: 'ongoing' | 'ended';
+  media: number;
+  callId: string;
+  room: string;
+  initiator: string;
+  participants: string[];
+  startedAt: number;
+  duration: number;
+}
+
+/**
+ * Reads the persistent-room card of a msg_type=22 message.
+ *
+ * Older 20/21/22 records (1:1 and family call logs) have no `status` field and
+ * keep the legacy rendering, so null means "not a group room card".
+ */
+export const groupCallCard = (raw: string): GroupCallCard | null => {
+  const parsed = parseContent(raw);
+  if (!parsed) return null;
+  const status = parsed.status;
+  if (status !== 'ongoing' && status !== 'ended') return null;
+  const participants = Array.isArray(parsed.participants)
+    ? (parsed.participants as unknown[]).map((item) => String(item)).filter(Boolean)
+    : [];
+  return {
+    status,
+    media: Number(parsed.media ?? 1) === 2 ? 2 : 1,
+    callId: typeof parsed.call_id === 'string' ? parsed.call_id : '',
+    room: typeof parsed.room === 'string' ? parsed.room : '',
+    initiator: parsed.initiator === undefined ? '' : String(parsed.initiator),
+    participants,
+    startedAt: Number(parsed.started_at ?? 0) || 0,
+    duration: Number(parsed.duration ?? 0) || 0,
+  };
+};
+
 /** Image payload of a msg_type 2 message, if any. */
 export const imageOf = (raw: string): { url: string; width: number; height: number } | null => {
   const parsed = parseContent(raw);
