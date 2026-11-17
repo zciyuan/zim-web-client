@@ -2655,8 +2655,13 @@ class ImStore {
       return;
     }
     if (event.opcode === OP.CALL_HANGUP || event.opcode === OP.CALL_CANCEL) {
-      // The peer hung up or cancelled: close the sheet on this side too.
       if (import.meta.env.DEV) console.debug(`[zim] remote end opcode=${event.opcode}`);
+      // A group call is a conference: one member hanging up only removes that
+      // member from the roster (the SFU tells us who left), and the cancel push
+      // is the initiator aborting the whole ring.
+      const groupHangup = event.opcode === OP.CALL_HANGUP && this.state.call.targetType === 2;
+      if (groupHangup) return;
+      // The peer hung up or cancelled: close the sheet on this side too.
       if (this.state.call.phase !== 'idle') {
         this.notify(event.opcode === OP.CALL_CANCEL ? '对方已取消' : '对方已挂断');
         void this.endCall('remote');
@@ -3045,7 +3050,17 @@ class ImStore {
       if (import.meta.env.DEV) console.debug('[zim] call answered, fetching room token');
       await this.joinCallRoom(call.callId, call.media === 2);
       this.clearCallTimers();
-      this.set({ call: { ...this.state.call, phase: 'active', startedAt: Date.now() } });
+      // The SFU snapshot may arrive after this transition: seed the roster with
+      // our own uid so the caller and callee agree on the head count at once.
+      const selfUid = String(this.state.me?.uid ?? '');
+      this.set({
+        call: {
+          ...this.state.call,
+          phase: 'active',
+          startedAt: Date.now(),
+          participants: Array.from(new Set([selfUid, ...this.state.call.participants].filter(Boolean))),
+        },
+      });
     } catch (err) {
       this.notify(`接听失败：${wrapError(err).display}`, 'error');
       await this.endCall('error');
@@ -3184,14 +3199,36 @@ class ImStore {
           this.set({ call: { ...call, participants: [...call.participants, identity] } });
         }
       },
-      onParticipantLeft: () => {
+      // Authoritative snapshot from the SFU: it also contains the participants
+      // that were already in the room before this client joined, which is why a
+      // late joiner used to show "0 人".
+      onParticipants: (identities) => {
         const call = this.state.call;
+        if (call.callId !== callId) return;
+        const selfUid = String(this.state.me?.uid ?? '');
+        const next = Array.from(new Set([selfUid, ...identities].filter(Boolean)));
+        const same = next.length === call.participants.length
+          && next.every((uid, index) => uid === call.participants[index]);
+        if (!same) this.set({ call: { ...call, participants: next } });
+      },
+      onParticipantLeft: (identity) => {
+        const call = this.state.call;
+        if (call.callId !== callId) return;
         // In a 1:1 call the other side leaving means the call is over; in a
-        // group call it is just one participant hanging up.
-        if (call.callId !== callId || call.targetType !== 1) return;
-        if (call.phase !== 'active' && call.phase !== 'connecting') return;
-        this.notify('对方已离开，通话结束');
-        void this.endCall('remote');
+        // group call the member is simply removed from the roster.
+        if (call.targetType === 1) {
+          if (call.phase !== 'active' && call.phase !== 'connecting') return;
+          this.notify('对方已离开，通话结束');
+          void this.endCall('remote');
+          return;
+        }
+        if (!identity) return;
+        const remaining = call.participants.filter((uid) => uid !== identity);
+        this.set({ call: { ...call, participants: remaining } });
+        const selfUid = String(this.state.me?.uid ?? '');
+        if (remaining.length <= 1 && remaining.every((uid) => uid === selfUid)) {
+          this.notify('其他成员已离开');
+        }
       },
       onDisconnected: () => {
         const call = this.state.call;

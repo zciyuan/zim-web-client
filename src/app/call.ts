@@ -13,6 +13,8 @@ export interface CallTrackHandlers {
   /** a remote participant left the room (1:1 calls end here). */
   onParticipantJoined?: (identity: string) => void;
   onParticipantLeft?: (identity: string) => void;
+  /** full remote participant snapshot (group calls show the live count). */
+  onParticipants?: (identities: string[]) => void;
   /** the room dropped for good (media/connection lost). */
   onDisconnected?: () => void;
 }
@@ -34,6 +36,7 @@ export class CallSession {
   onTrack(handlers: CallTrackHandlers): void {
     this.handlers = { ...this.handlers, ...handlers };
     this.emitTracks();
+    this.emitParticipants();
     if (this.handlers.onSpeakers) this.handlers.onSpeakers(this.speakers);
   }
 
@@ -86,9 +89,13 @@ export class CallSession {
 
     room.on(RoomEvent.ParticipantConnected, (participant) => {
       this.handlers.onParticipantJoined?.(participant.identity);
+      // The snapshot is authoritative: it also covers participants that were
+      // already in the room when this client connected.
+      this.emitParticipants();
     });
     room.on(RoomEvent.ParticipantDisconnected, (participant) => {
       this.handlers.onParticipantLeft?.(participant.identity);
+      this.emitParticipants();
     });
     room.on(RoomEvent.Disconnected, () => {
       this.handlers.onDisconnected?.();
@@ -103,7 +110,10 @@ export class CallSession {
     // ("pcManager is not ready"): this.publish retries instead of giving up.
     // Publish exactly once — a second concurrent negotiation times out.
     await room.connect(url, token);
+    // Participants already in the room never fire ParticipantConnected here.
+    this.emitParticipants();
     await this.publish(room, video);
+    this.emitParticipants();
   }
 
   /**
@@ -138,6 +148,15 @@ export class CallSession {
   private emitTracks(): void {
     if (!this.handlers.onRemoteTracks) return;
     this.handlers.onRemoteTracks(new Map(this.videoTracks));
+  }
+
+  /** Remote identities currently in the room. */
+  private participantsSnapshot(): string[] {
+    return this.room ? [...this.room.remoteParticipants.keys()].filter(Boolean) : [];
+  }
+
+  private emitParticipants(): void {
+    this.handlers.onParticipants?.(this.participantsSnapshot());
   }
 
   /** Local camera element for the self-view (video calls). */
@@ -196,6 +215,7 @@ export class CallSession {
   }
 
   async end(): Promise<void> {
+    this.handlers.onParticipants?.([]);
     this.videoTracks.clear();
     this.mediaErrors = [];
     this.localVideoEl = null;
