@@ -154,6 +154,16 @@ export class IMHttp {
     return data;
   }
 
+  /** Reads the public client configuration (`client.*` keys). */
+  async clientConfig(): Promise<Record<string, string>> {
+    const data = await this.send<{ items: { key: string; value: string }[] }>('GET', '/v1/client-config');
+    const map: Record<string, string> = {};
+    for (const item of data.items ?? []) {
+      if (item && typeof item.key === 'string') map[item.key] = item.value;
+    }
+    return map;
+  }
+
   // --------------------------------------------------------------- uploads --
 
   /** Resolves a server-relative path against the configured base. */

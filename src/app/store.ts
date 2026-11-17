@@ -6,6 +6,7 @@
 import { useSyncExternalStore } from 'react';
 
 import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
+import { decideTransport, parseTransports, probeWebTransport, recordDecision, webTransportGatewayUrl, type TransportDecision } from '../sdk/transport';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
@@ -207,6 +208,8 @@ export interface ImState {
   groupNotices: Record<string, string>;
   /** repeated abnormal closes: the account is live elsewhere, stop retrying */
   kickedLoop: boolean;
+  /** transport negotiation result (browser always falls back to ws today) */
+  transport: TransportDecision | null;
   /** direct chats: how far the peer has read (seq, from 1906) */
   peerReads: Record<string, number>;
   quoteTarget: UiMessage | null;
@@ -256,6 +259,7 @@ const initialState: ImState = {
   drafts: {},
   groupNotices: {},
   kickedLoop: false,
+  transport: null,
   quoteTarget: null,
   call: emptyCall(),
   groupCalls: {},
@@ -749,10 +753,46 @@ class ImStore {
     throw lastError;
   }
 
+  /**
+   * Reads `transports` from the client config and records which transport this
+   * browser may use. The web client always ends up on WS today: the gate's QUIC
+   * listener speaks a custom protocol (browser-inaccessible ALPN, not HTTP/3),
+   * and a WebTransport gateway does not exist yet. When one lands, the WebTransport
+   * transport can be plugged in behind this decision without touching the app.
+   */
+  private async loadTransportConfig(): Promise<void> {
+    let options: ReturnType<typeof parseTransports> = [];
+    try {
+      const items = await this.rest?.clientConfig();
+      const raw = items?.['transports'] ?? items?.['client.transports'];
+      options = parseTransports(raw);
+    } catch (err) {
+      if (import.meta.env.DEV) console.debug('[zim] transport config unavailable', String(err));
+    }
+    const seed = `${deviceId()}|${this.state.me?.uid ?? ''}`;
+    const decision = recordDecision(decideTransport(options, seed));
+    this.set({ transport: decision });
+    if (import.meta.env.DEV) {
+      console.debug(`[zim] transport ${decision.kind} (${decision.reason}) bucket=${decision.bucket}`);
+    }
+    if (decision.kind === 'webtransport' && decision.option) {
+      // Only reached once a WebTransport gateway is advertised: the 200ms probe
+      // is the contract's fallback trigger.
+      const url = webTransportGatewayUrl(decision.option);
+      void probeWebTransport(url, 200).then((result) => {
+        if (import.meta.env.DEV) console.debug(`[zim] webtransport probe ok=${result.ok} ${result.ms}ms`);
+      });
+    }
+  }
+
   private async enterWorkspace(token: string, endpoint: string, username: string): Promise<void> {
     // Same-platform logins are single-session: the newest connection wins and the
     // server pushes 1902 to the old one, which then logs out (see handleKick).
     this.set({ kickedLoop: false });
+    // Negotiate the transport before dialing. The browser can only speak WS
+    // today (raw QUIC is native-only; WebTransport needs a gateway the gate does
+    // not expose yet), but the decision + rollout metrics are recorded here.
+    await this.loadTransportConfig();
     // One live socket per client: a re-login must not leave the previous one
     // reconnecting in the background (it would kick the new connection).
     this.client?.close();
