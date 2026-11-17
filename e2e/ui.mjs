@@ -214,7 +214,7 @@ const main = async () => {
 
   const text = `React 实时消息 ${Date.now()}`;
   step(`bob sends: ${text}`);
-  await bob.focus('textarea');
+  await bob.focus('[aria-label="消息输入"]');
   await bob.keyboard.type(text);
   await bob.keyboard.press('Enter');
   await bob.waitForFunction(
@@ -255,7 +255,7 @@ const main = async () => {
   // the send is retried instead of waiting for a stable "open" snapshot.
   let replied = false;
   for (let attempt = 0; attempt < 6 && !replied; attempt += 1) {
-    await setValue(alice, 'textarea', '收到，来自 React 客户端');
+    await setValue(alice, '[aria-label="消息输入"]', '收到，来自 React 客户端');
     // Click the send button: headless Enter does not always reach the composer
     // when two tabs are open, while the button press is deterministic.
     await alice.evaluate(() => {
@@ -433,7 +433,7 @@ const main = async () => {
   await jsClick(alice, '[aria-label="表情"]');
   await alice.waitForSelector('[role="dialog"][aria-label="表情"]', { timeout: 5_000 });
   await jsClick(alice, '[aria-label="😀"]');
-  const draft = await alice.$eval('textarea', (el) => el.value);
+  const draft = await alice.$eval('[aria-label="消息输入"]', (el) => el.value);
   assert.ok(draft.includes('😀'), 'emoji should land in the composer');
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
@@ -782,7 +782,7 @@ const main = async () => {
   });
   assert.ok(quoteSnippet, `quote preview is empty (${quotedSnippet})`);
   const quoteText = `引用测试回复 ${Date.now() % 100000}`;
-  await setValue(alice, 'textarea', quoteText);
+  await setValue(alice, '[aria-label="消息输入"]', quoteText);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -887,7 +887,7 @@ const main = async () => {
   await jsClick(bob, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(bob, 'Alice', 'Alice', '[aria-label="聊天"] header');
   const readText = `已读测试 ${Date.now()}`;
-  await setValue(bob, 'textarea', readText);
+  await setValue(bob, '[aria-label="消息输入"]', readText);
   await bob.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -1028,7 +1028,7 @@ const main = async () => {
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
   const longText = `长文本测试 ${'内容'.repeat(260)}${Date.now() % 10000}`;
-  await setValue(alice, 'textarea', longText);
+  await setValue(alice, '[aria-label="消息输入"]', longText);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -1114,7 +1114,7 @@ const main = async () => {
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
   const linkText = `文档 https://example.com/zim/docs 邮箱 dev@example.com ${Date.now() % 10000}`;
-  await setValue(alice, 'textarea', linkText);
+  await setValue(alice, '[aria-label="消息输入"]', linkText);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -1248,7 +1248,7 @@ const main = async () => {
   });
   await alice.waitForSelector('[data-quote-preview]', { timeout: 10_000 });
   const mentionReply = `引用回复 ${Date.now() % 10000}`;
-  await setValue(alice, 'textarea', mentionReply);
+  await setValue(alice, '[aria-label="消息输入"]', mentionReply);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -1330,7 +1330,7 @@ const main = async () => {
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
-  await setValue(alice, 'textarea', '@');
+  await setValue(alice, '[aria-label="消息输入"]', '@');
   await alice.waitForSelector('[data-mention-picker]', { timeout: 10_000 });
   const mentionName = await alice.evaluate(() => {
     // "@所有人" comes first in group chats: pick a member option instead.
@@ -1344,10 +1344,10 @@ const main = async () => {
   });
   assert.ok(mentionName.includes('Bob'), `unexpected mention candidate: ${mentionName}`);
   await alice.waitForFunction(
-    () => (document.querySelector('textarea')?.value ?? '').includes('@'),
+    () => (document.querySelector('[aria-label="消息输入"]')?.value ?? '').includes('@'),
     { timeout: 10_000 },
   );
-  await setValue(alice, 'textarea', `@${mentionName.replace(/\s*\d+$/, '').trim()} 请看这里 ${Date.now() % 10000}`);
+  await setValue(alice, '[aria-label="消息输入"]', `@${mentionName.replace(/\s*\d+$/, '').trim()} 请看这里 ${Date.now() % 10000}`);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -1364,15 +1364,15 @@ const main = async () => {
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
-  await setValue(alice, 'textarea', '@');
+  await setValue(alice, '[aria-label="消息输入"]', '@');
   await alice.waitForSelector('[data-mention-option="all"]', { timeout: 10_000 });
   await jsClick(alice, '[data-mention-option="all"]');
   await alice.waitForFunction(
-    () => (document.querySelector('textarea')?.value ?? '').includes('@所有人'),
+    () => (document.querySelector('[aria-label="消息输入"]')?.value ?? '').includes('@所有人'),
     { timeout: 10_000 },
   );
   const allText = `全体注意 ${Date.now() % 10000}`;
-  await setValue(alice, 'textarea', `@所有人 ${allText}`);
+  await setValue(alice, '[aria-label="消息输入"]', `@所有人 ${allText}`);
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '发送');
@@ -1539,7 +1539,7 @@ const main = async () => {
   step('typing indicator reaches the peer');
   // Bob types without sending; Alice's header shows the typing hint.
   await bob.bringToFront();
-  await setValue(bob, 'textarea', 'typing…');
+  await setValue(bob, '[aria-label="消息输入"]', 'typing…');
   await alice.bringToFront();
   await alice.waitForFunction(
     () => document.querySelector('[data-typing="true"]') !== null,
@@ -1548,7 +1548,7 @@ const main = async () => {
   const typingText = await alice.evaluate(() => document.querySelector('[data-typing="true"]')?.textContent ?? '');
   assert.ok(typingText.includes('正在输入'), `typing hint text = ${typingText}`);
   await bob.evaluate(() => {
-    const input = document.querySelector('textarea');
+    const input = document.querySelector('[aria-label="消息输入"]');
     if (input) {
       const proto = HTMLTextAreaElement.prototype;
       Object.getOwnPropertyDescriptor(proto, 'value').set.call(input, '');

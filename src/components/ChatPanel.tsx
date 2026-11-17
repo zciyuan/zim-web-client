@@ -768,6 +768,7 @@ function Composer({ disabled }: { disabled: boolean }) {
 
       <textarea
         ref={inputRef}
+        aria-label="消息输入"
         value={value}
         rows={1}
         maxLength={4000}
