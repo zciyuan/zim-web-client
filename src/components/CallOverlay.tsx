@@ -172,7 +172,7 @@ export function CallOverlay() {
           ) : null}
         </div>
 
-        {call.targetType === 2 ? (
+        {call.targetType === 2 && call.participants.length > 0 ? (
           <div
             data-participants={call.participants.length}
             className="flex flex-wrap items-center gap-1.5 border-t border-slate-800 px-4 py-2 text-[11px] text-slate-300"
