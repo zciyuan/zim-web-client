@@ -994,7 +994,7 @@ export function ChatPanel() {
                 onClick={() => void imStore.startCall(1)}
                 className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
               >
-                <span className="hidden sm:inline">语音</span><span className="sm:hidden" aria-hidden>📞</span>
+                <span className="hidden sm:inline">语音</span><span className="sm:hidden before:content-['📞']" aria-hidden />
               </button>
               <button
                 type="button"
@@ -1004,7 +1004,7 @@ export function ChatPanel() {
                 onClick={() => void imStore.startCall(2)}
                 className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
               >
-                <span className="hidden sm:inline">视频</span><span className="sm:hidden" aria-hidden>📹</span>
+                <span className="hidden sm:inline">视频</span><span className="sm:hidden before:content-['📹']" aria-hidden />
               </button>
             </>
           ) : null}
@@ -1014,7 +1014,7 @@ export function ChatPanel() {
             onClick={() => conversation && imStore.exportConversation(conversation.conversation_id)}
             className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
           >
-            <span className="hidden sm:inline">导出</span><span className="sm:hidden" aria-hidden>⬇️</span>
+            <span className="hidden sm:inline">导出</span><span className="sm:hidden before:content-['⬇️']" aria-hidden />
           </button>
           <button
             type="button"
@@ -1022,7 +1022,7 @@ export function ChatPanel() {
             onClick={() => setSearchOpen((open) => !open)}
             className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
           >
-            <span className="hidden sm:inline">搜索</span><span className="sm:hidden" aria-hidden>🔍</span>
+            <span className="hidden sm:inline">搜索</span><span className="sm:hidden before:content-['🔍']" aria-hidden />
           </button>
           <button
             type="button"
@@ -1037,7 +1037,7 @@ export function ChatPanel() {
                 : 'border-slate-200 text-slate-500 hover:border-indigo-400 dark:border-slate-700'
             }`}
           >
-            <span className="hidden sm:inline">多选</span><span className="sm:hidden" aria-hidden>☑️</span>
+            <span className="hidden sm:inline">多选</span><span className="sm:hidden before:content-['☑️']" aria-hidden />
           </button>
           {isGroup ? (
             <button
@@ -1046,7 +1046,7 @@ export function ChatPanel() {
               aria-label="群设置"
               className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
             >
-              <span className="hidden sm:inline">群设置</span><span className="sm:hidden" aria-hidden>⚙️</span>
+              <span className="hidden sm:inline">群设置</span><span className="sm:hidden before:content-['⚙️']" aria-hidden />
             </button>
           ) : null}
         </div>

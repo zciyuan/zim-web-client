@@ -879,6 +879,9 @@ class ImStore {
       if (this.lastTypingSentAt) this.sendTyping(this.state.activeCid, false);
       this.lastTypingSentAt = 0;
     }
+    if (import.meta.env.DEV) {
+      console.debug(`[zim] openConversation cid=${cid} items=${this.state.threads[cid]?.items.length ?? 0}`);
+    }
     if (this.state.activeCid !== cid) this.set({ searchHighlight: '' });
     this.set({ activeCid: cid, tab: this.state.tab === 'friends' || this.state.tab === 'groups' ? 'conversations' : this.state.tab });
     const conversation = this.conversation(cid);
@@ -891,7 +894,13 @@ class ImStore {
     }
 
     const existing = this.state.threads[cid];
-    if (existing && existing.items.length > 0) return;
+    if (existing && existing.items.length > 0) {
+      // The thread is cached, but new messages may have arrived while it was
+      // closed: opening it must still send the read receipt, otherwise the
+      // sender's bubble stays on 未读.
+      void this.markRead(cid);
+      return;
+    }
 
     this.patchThread(cid, { loading: true, error: '' });
     try {

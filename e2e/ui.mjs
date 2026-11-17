@@ -530,10 +530,10 @@ const main = async () => {
   step('group settings dialog lists members');
   await clickByText(alice, '[aria-label="聊天"] button', '群设置');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
-  await clickByText(alice, 'dialog button', '成员');
+  await clickByText(alice, 'dialog[open] button', '成员');
   await alice.waitForFunction(
-    () => (document.querySelector('dialog')?.textContent ?? '').includes('群主')
-      || (document.querySelector('dialog')?.textContent ?? '').includes('成员'),
+    () => (document.querySelector('dialog[open]')?.textContent ?? '').includes('群主')
+      || (document.querySelector('dialog[open]')?.textContent ?? '').includes('成员'),
     { timeout: 10_000 },
   );
   await alice.screenshot({ path: path.join(OUT, '09-group-settings.png') });
@@ -547,20 +547,20 @@ const main = async () => {
   await clickByText(alice, '[aria-label="列表"] button', '新建');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
   const newGroupName = `E2E 群 ${Date.now() % 10000}`;
-  await setValue(alice, 'dialog input:not([type])', newGroupName);
+  await setValue(alice, 'dialog[open] input:not([type])', newGroupName);
   await alice.evaluate(() => {
     // Pick Bob: the invitee list order depends on the seeded friends.
-    const rows = [...document.querySelectorAll('dialog label, dialog div')]
+    const rows = [...document.querySelectorAll('dialog[open] label, dialog[open] div')]
       .filter((node) => (node.textContent ?? '').includes('Bob'));
     const row = rows.find((node) => node.querySelector('input[type="checkbox"]'));
     const box = row?.querySelector('input[type="checkbox"]')
-      ?? document.querySelector('dialog input[type="checkbox"]');
+      ?? document.querySelector('dialog[open] input[type="checkbox"]');
     if (!box) throw new Error('no friend to pick');
     box.click();
   });
   let created = false;
   for (let attempt = 0; attempt < 15 && !created; attempt += 1) {
-    await clickByText(alice, 'dialog button', '创建群');
+    await clickByText(alice, 'dialog[open] button', '创建群');
     await new Promise((resolve) => setTimeout(resolve, 900));
     created = await alice.evaluate(() =>
       Boolean(document.querySelector('[aria-label="聊天"] h2')?.textContent?.includes('E2E 群')));
@@ -720,7 +720,10 @@ const main = async () => {
     button.click();
   });
   assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'group caller should hang up');
-  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'group member sheet should close');
+  // A group call is a conference: the caller leaving keeps it open for the rest.
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'group member stays after the caller leaves');
+  await bob.evaluate(() => window.__zim.hangupCall());
+  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'group member hangs up');
   // The server writes a msg_type=22 record into the group. Verify it reached
   // the client through the conversation list (the DOM check races the push).
   await alice.evaluate(async () => {
@@ -772,7 +775,10 @@ const main = async () => {
     button.click();
   });
   assert.equal(await waitCallPhase(alice, ['idle']), 'idle', 'video caller should hang up');
-  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'video callee sheet should close');
+  // Same conference rule for video: the callee keeps the call until they leave.
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'video callee stays after the caller leaves');
+  await bob.evaluate(() => window.__zim.hangupCall());
+  assert.equal(await waitCallPhase(bob, ['idle']), 'idle', 'video callee hangs up');
 
   step('quote reply carries the quoted snippet');
   await alice.bringToFront();
@@ -1154,24 +1160,24 @@ const main = async () => {
   await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
   await jsClick(alice, '[aria-label="群设置"]');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
-  await clickByText(alice, 'dialog button', '成员');
+  await clickByText(alice, 'dialog[open] button', '成员');
   await alice.waitForSelector('[data-member-row]', { timeout: 15_000 });
   const memberCount = await alice.evaluate(() => document.querySelectorAll('[data-member-row]').length);
   const ownerBadge = await alice.evaluate(() => document.querySelectorAll('[data-role-badge="owner"]').length);
   assert.ok(ownerBadge >= 1, 'owner badge missing');
-  await setValue(alice, 'dialog input[aria-label="搜索群成员"]', 'zzz-not-a-member');
+  await setValue(alice, 'dialog[open] input[aria-label="搜索群成员"]', 'zzz-not-a-member');
   await alice.waitForFunction(
     (before) => document.querySelectorAll('[data-member-row]').length < before,
     { timeout: 10_000 },
     memberCount,
   );
-  await setValue(alice, 'dialog input[aria-label="搜索群成员"]', '');
+  await setValue(alice, 'dialog[open] input[aria-label="搜索群成员"]', '');
   await alice.waitForFunction(
     (before) => document.querySelectorAll('[data-member-row]').length === before,
     { timeout: 10_000 },
     memberCount,
   );
-  await clickByText(alice, 'dialog button', '关闭');
+  await clickByText(alice, 'dialog[open] button', '关闭');
 
   step('long-press opens the message menu on touch');
   await alice.bringToFront();
@@ -1226,12 +1232,12 @@ const main = async () => {
   await jsClick(alice, '[aria-label="群设置"]');
   await alice.waitForSelector('dialog[open]', { timeout: 10_000 });
   // The dialog remembers the last tab (members); go back to profile first.
-  await clickByText(alice, 'dialog button', '群资料');
+  await clickByText(alice, 'dialog[open] button', '群资料');
   await alice.waitForSelector('dialog[open] textarea', { timeout: 10_000 });
   const hasNoticeField = await alice.evaluate(() => [...document.querySelectorAll('dialog[open] textarea')]
     .some((node) => (node.previousElementSibling?.textContent ?? '').includes('群公告')));
   assert.ok(hasNoticeField, '群公告 field missing from the settings dialog');
-  await clickByText(alice, 'dialog button', '关闭');
+  await clickByText(alice, 'dialog[open] button', '关闭');
 
   // The same call the dialog's save button makes; the banner must follow.
   const saved = await alice.evaluate(async (text) => {
