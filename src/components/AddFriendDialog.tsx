@@ -56,7 +56,7 @@ export function AddFriendDialog({ open, onClose }: AddFriendDialogProps) {
     <dialog
       ref={setDialogEl}
       onClose={onClose}
-      className="w-[min(460px,94vw)] rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl backdrop:bg-slate-900/40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+      className="m-auto max-h-[85dvh] w-[min(460px,92vw)] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl backdrop:bg-slate-900/40 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
     >
       <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-700">
         <h3 className="text-sm font-semibold">添加好友</h3>

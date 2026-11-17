@@ -821,6 +821,16 @@ export function ChatPanel() {
   const [contextMenu, setContextMenu] = useState<{ message: UiMessage; x: number; y: number } | null>(null);
   const [editTarget, setEditTarget] = useState<string | null>(null);
   const [forwardTargets, setForwardTargets] = useState<string[]>([]);
+  const [forwardDialogEl, setForwardDialogEl] = useState<HTMLDialogElement | null>(null);
+
+  // The forward/merge picker is a modal: an inline <dialog open> stays in the
+  // page flow and mixes with the conversation behind it.
+  const forwardDialogOpen = Boolean(forwardTarget) || mergePending;
+  useEffect(() => {
+    if (!forwardDialogEl) return;
+    if (forwardDialogOpen && !forwardDialogEl.open) forwardDialogEl.showModal();
+    if (!forwardDialogOpen && forwardDialogEl.open) forwardDialogEl.close();
+  }, [forwardDialogOpen, forwardDialogEl]);
 
   // Global search / quote jump: scroll the target message into view and flash it.
   useEffect(() => {
@@ -957,7 +967,7 @@ export function ChatPanel() {
         }
       }}
     >
-      <header className="flex items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900">
+      <header className="flex flex-col gap-2 border-b border-slate-200 bg-white px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-4 sm:py-3 dark:border-slate-800 dark:bg-slate-900">
         <div className="flex min-w-0 items-center gap-2">
           <button
             type="button"
@@ -982,9 +992,9 @@ export function ChatPanel() {
                 data-rtc-support={imStore.rtcSupport.supported ? 'ok' : imStore.rtcSupport.reason}
                 title={imStore.rtcSupport.supported ? '发起语音通话' : imStore.rtcSupport.detail}
                 onClick={() => void imStore.startCall(1)}
-                className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+                className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
               >
-                语音
+                <span className="hidden sm:inline">语音</span><span className="sm:hidden" aria-hidden>📞</span>
               </button>
               <button
                 type="button"
@@ -992,9 +1002,9 @@ export function ChatPanel() {
                 data-rtc-support={imStore.rtcSupport.supported ? 'ok' : imStore.rtcSupport.reason}
                 title={imStore.rtcSupport.supported ? '发起视频通话' : imStore.rtcSupport.detail}
                 onClick={() => void imStore.startCall(2)}
-                className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+                className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
               >
-                视频
+                <span className="hidden sm:inline">视频</span><span className="sm:hidden" aria-hidden>📹</span>
               </button>
             </>
           ) : null}
@@ -1002,17 +1012,17 @@ export function ChatPanel() {
             type="button"
             aria-label="导出聊天记录"
             onClick={() => conversation && imStore.exportConversation(conversation.conversation_id)}
-            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
           >
-            导出
+            <span className="hidden sm:inline">导出</span><span className="sm:hidden" aria-hidden>⬇️</span>
           </button>
           <button
             type="button"
             aria-label="消息搜索"
             onClick={() => setSearchOpen((open) => !open)}
-            className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
           >
-            搜索
+            <span className="hidden sm:inline">搜索</span><span className="sm:hidden" aria-hidden>🔍</span>
           </button>
           <button
             type="button"
@@ -1027,16 +1037,16 @@ export function ChatPanel() {
                 : 'border-slate-200 text-slate-500 hover:border-indigo-400 dark:border-slate-700'
             }`}
           >
-            多选
+            <span className="hidden sm:inline">多选</span><span className="sm:hidden" aria-hidden>☑️</span>
           </button>
           {isGroup ? (
             <button
               type="button"
               onClick={() => setMembersOpen(true)}
               aria-label="群设置"
-              className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 transition hover:border-indigo-400 dark:border-slate-700"
+              className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-500 transition hover:border-indigo-400 sm:px-2.5 dark:border-slate-700"
             >
-              群设置
+              <span className="hidden sm:inline">群设置</span><span className="sm:hidden" aria-hidden>⚙️</span>
             </button>
           ) : null}
         </div>
@@ -1281,12 +1291,17 @@ export function ChatPanel() {
       />
 
       <dialog
-        open={Boolean(forwardTarget) || mergePending}
+        ref={setForwardDialogEl}
         onClose={() => {
           setForwardTarget(null);
           setMergePending(false);
         }}
-        className="w-[min(420px,94vw)] rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+        onCancel={(event) => {
+          event.preventDefault();
+          setForwardTarget(null);
+          setMergePending(false);
+        }}
+        className="m-auto w-[min(420px,92vw)] max-h-[85dvh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl backdrop:bg-slate-900/50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
       >
         <header className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
           <h3 className="text-sm font-semibold">{mergePending ? '合并转发到' : '转发到'}</h3>

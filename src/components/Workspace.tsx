@@ -360,7 +360,7 @@ function Sidebar() {
 
   return (
     <section
-      className={`${state.activeCid ? 'hidden md:flex' : 'flex'} w-full shrink-0 flex-col border-r border-slate-200 bg-white md:w-[300px] dark:border-slate-800 dark:bg-slate-900`}
+      className={`${state.activeCid ? 'hidden md:flex' : 'flex'} min-w-0 flex-1 flex-col border-r border-slate-200 bg-white md:w-[300px] md:flex-none dark:border-slate-800 dark:bg-slate-900`}
       aria-label="列表"
     >
       <header className="flex items-center justify-between px-4 pt-4 pb-2.5">
@@ -970,7 +970,7 @@ export function Workspace() {
           </button>
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <Rail />
         <Sidebar />
         <ChatPanel />

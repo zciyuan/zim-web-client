@@ -3,12 +3,25 @@ import { useEffect, useState } from 'react';
 import { Avatar } from './Avatar';
 import { imStore, useIm } from '../app/store';
 
-/** Edits the signed-in user's nickname and avatar. */
+/**
+ * Edits the signed-in user's nickname and avatar.
+ *
+ * Rendered through showModal() so the dialog sits in the browser's top layer:
+ * an inline <dialog open> would stay in the page flow, which made the profile
+ * panel bleed into the sidebar behind it and clipped it on narrow screens.
+ */
 export function ProfileDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const state = useIm();
+  const [dialogEl, setDialogEl] = useState<HTMLDialogElement | null>(null);
   const [nickname, setNickname] = useState('');
   const [avatar, setAvatar] = useState('');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!dialogEl) return;
+    if (open && !dialogEl.open) dialogEl.showModal();
+    if (!open && dialogEl.open) dialogEl.close();
+  }, [open, dialogEl]);
 
   useEffect(() => {
     if (!open) return;
@@ -16,8 +29,6 @@ export function ProfileDialog({ open, onClose }: { open: boolean; onClose: () =>
     setAvatar(state.me?.avatar ?? '');
     setBusy(false);
   }, [open, state.me?.name, state.me?.avatar]);
-
-  if (!open) return null;
 
   const save = async () => {
     setBusy(true);
@@ -31,11 +42,17 @@ export function ProfileDialog({ open, onClose }: { open: boolean; onClose: () =>
 
   return (
     <dialog
-      open
+      ref={setDialogEl}
       aria-label="个人资料"
-      className="w-[min(380px,94vw)] rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+      onClose={onClose}
+      onCancel={(event) => {
+        // Escape must also reset the React state that opened the dialog.
+        event.preventDefault();
+        onClose();
+      }}
+      className="m-auto w-[min(420px,92vw)] max-h-[85dvh] overflow-y-auto rounded-2xl border border-slate-200 bg-white p-0 text-slate-900 shadow-2xl backdrop:bg-slate-900/50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
     >
-      <header className="flex items-center justify-between border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
+      <header className="sticky top-0 flex items-center justify-between border-b border-slate-200 bg-white px-4 py-2.5 dark:border-slate-700 dark:bg-slate-900">
         <h3 className="text-sm font-semibold">个人资料</h3>
         <button type="button" aria-label="关闭资料" onClick={onClose} className="rounded-lg border border-slate-200 px-2 py-0.5 text-xs dark:border-slate-700">
           关闭
