@@ -769,8 +769,12 @@ class ImStore {
           if (this.closeStamps.length >= 4) this.stopKickLoop();
         }
         if (connection === 'open' || connection === 'reconnected') this.closeStamps = [];
-        // A reconnect may have missed pushes: converge with 1601/1514.
-        if (connection === 'reconnected') void this.runSync();
+        // A reconnect may have missed pushes: converge with 1601/1514 and
+        // reconcile the call sheet through 1805.
+        if (connection === 'reconnected') {
+          void this.runSync();
+          void this.reconcileCall();
+        }
       },
       onPush: (event) => void this.handlePush(event),
       onKick: (event) => this.handleKick(event.reason),
@@ -2888,13 +2892,86 @@ class ImStore {
     }
   }
 
-  /** Arms the shared ring timeout for the phase that is being entered. */
-  private armRingTimer(): void {
+  /** Requests the mic before joining (mobile audio sessions need it early). */
+  private async prepareMicrophone(): Promise<void> {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((track) => track.stop());
+    } catch {
+      this.notify('无法访问麦克风，对方将听不到你的声音', 'error');
+    }
+  }
+
+  /**
+   * Media attach with the two recoveries the SFU needs:
+   * - a stale tab still holding the same identity is dropped and retried;
+   * - 180009 (expired/invalid token) refetches a token through 1806.
+   */
+  private async connectMedia(callId: string, video: boolean, token: string, sfuUrl: string): Promise<void> {
+    const attempt = (nextToken: string, nextUrl: string) => callSession.connect(sfuUrlFor(nextUrl), nextToken, video);
+    try {
+      await attempt(token, sfuUrl);
+    } catch (err) {
+      const text = String(err);
+      if (/Client initiated disconnect|duplicate identity/i.test(text)) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1800));
+        await attempt(token, sfuUrl);
+        return;
+      }
+      if (/token|expired|unauthorized|permission|forbidden/i.test(text) && this.client) {
+        const fresh = await this.client
+          .request(OP.ROOM_TOKEN, encodeRoomTokenReq({ callId }), decodeRoomTokenRes)
+          .catch(() => undefined);
+        if (fresh?.payload.token && fresh.payload.sfu_url) {
+          await attempt(fresh.payload.token, fresh.payload.sfu_url);
+          return;
+        }
+      }
+      throw err;
+    }
+  }
+
+  /** Attaches media after an answer, preferring the token carried by phase=2. */
+  private async attachAnswered(callId: string, video: boolean, token: string, sfuUrl: string): Promise<void> {
+    try {
+      if (this.state.call.callId !== callId) return;
+      if (token && sfuUrl) {
+        await this.connectRoom({ callId, token, sfuUrl, video });
+      } else {
+        await this.joinCallRoom(callId, video);
+      }
+      if (this.state.call.callId !== callId) return;
+      if (this.state.call.participants.length > 1) this.markConnected(callId);
+    } catch (err) {
+      this.notify(`加入通话失败：${wrapError(err).display}`, 'error');
+      await this.endCall('error');
+    }
+  }
+
+  /**
+   * Marks the call connected only when the media session is up and a remote
+   * participant is already present (the LiveKit snapshot or a join event).
+   */
+  private markConnected(callId: string): void {
+    const call = this.state.call;
+    if (call.callId !== callId || call.phase === 'active') return;
     this.clearCallTimers();
+    this.notify('通话已接通');
+    this.set({ call: { ...call, phase: 'active', joined: true, startedAt: call.startedAt || Date.now() } });
+  }
+
+  /** Arms the shared ring timeout for the phase that is being entered. */
+  private armRingTimer(expireAt = 0): void {
+    this.clearCallTimers();
+    // Iteration 1 returns expire_at with the invite: honour it (clamped) so the
+    // server and the client give up at the same moment.
+    const remaining = expireAt > 0
+      ? Math.min(Math.max(expireAt - Date.now(), 5_000), 60_000)
+      : CALL_RING_TIMEOUT_MS;
     this.ringTimer = window.setTimeout(() => {
       this.ringTimer = null;
       void this.onRingTimeout();
-    }, CALL_RING_TIMEOUT_MS);
+    }, remaining);
   }
 
   /** Ring timeout: the caller gives up, the callee dismisses the sheet. */
@@ -3013,24 +3090,24 @@ class ImStore {
             selfUid,
             ...(update.from_uid ? [String(update.from_uid)] : []),
           ].filter(Boolean)));
+          // Answered: "已接通" waits for the SFU connection plus a remote
+          // participant, so the sheet shows "正在接通…" until media is live.
           this.set({
             call: {
               ...this.state.call,
-              phase: 'active',
+              // Answered but no remote media yet: "正在接通…" until the SFU
+              // reports the peer (rooms that are already live stay active).
+              phase: this.state.call.phase === 'active' ? 'active' : 'connecting',
               participants,
               room: update.room || this.state.call.room,
-              startedAt: this.state.call.startedAt || Date.now(),
             },
           });
-          // A 1:1 caller joined no room while ringing: attach the media session
-          // now that the server accepts tokens for an answered call. Group and
-          // family callers join in startGroupCall/startFamilyCall, so a later
-          // phase=2 must not connect a second time.
-          if (!this.state.call.joined && (this.state.call.targetType === 1 || this.state.call.targetType === 3)) {
-            void this.joinCallRoom(update.call_id, this.state.call.media === 2).catch((err) => {
-              this.notify(`加入通话失败：${wrapError(err).display}`, 'error');
-              void this.endCall('error');
-            });
+          if (!this.state.call.joined) {
+            // The phase=2 frame carries a token now (iteration 1); fall back to
+            // 1806 for older servers.
+            void this.attachAnswered(update.call_id, update.media === 2, update.token ?? '', update.sfu_url ?? '');
+          } else if (participants.length > 1) {
+            this.markConnected(update.call_id);
           }
         }
         break;
@@ -3126,9 +3203,24 @@ class ImStore {
         decodeCallInviteRes,
       );
       this.set({ call: { ...this.state.call, room: res.payload.room } });
-      // A ringing 1:1 call has no joinable room yet (the server only issues a
-      // token once it is answered): wait for phase=2 and join from there.
-      this.clearConnectTimer();
+      // Iteration 1: the invite response carries a token for every target type,
+      // so the caller joins the SFU right away and waits as "calling" instead of
+      // waiting for phase=2 to open the media session.
+      this.armRingTimer(Number(res.payload.expire_at) || 0);
+      if (res.payload.token && res.payload.sfu_url) {
+        try {
+          await this.connectRoom({
+            callId: res.payload.call_id || callId,
+            token: res.payload.token,
+            sfuUrl: res.payload.sfu_url,
+            video: media === 2,
+          });
+          this.clearConnectTimer();
+        } catch (err) {
+          // The invite is already out: keep ringing and retry from phase=2.
+          this.notify(`媒体连接失败：${wrapError(err).display}`, 'error');
+        }
+      }
     } catch (err) {
       const wrapped = wrapError(err);
       // 180001: the callee has no online device, the room was never joined.
@@ -3153,21 +3245,33 @@ class ImStore {
     this.clearCallTimers();
     this.armConnectTimer();
     try {
-      await this.client.request(OP.CALL_ANSWER, encodeCallAnswerReq({ callId: call.callId, accept: true }), decodeCallAnswer);
-      if (import.meta.env.DEV) console.debug('[zim] call answered, fetching room token');
-      await this.joinCallRoom(call.callId, call.media === 2);
+      const answer = await this.client.request(
+        OP.CALL_ANSWER,
+        encodeCallAnswerReq({ callId: call.callId, accept: true }),
+        decodeCallAnswer,
+      );
+      if (import.meta.env.DEV) console.debug('[zim] call answered, attaching media');
+      // Ask for the microphone before joining so the first frames are not silent
+      // and the user sees the permission prompt while the call is still ringing.
+      await this.prepareMicrophone();
+      if (answer.payload.token && answer.payload.sfu_url) {
+        await this.connectRoom({
+          callId: call.callId,
+          token: answer.payload.token,
+          sfuUrl: answer.payload.sfu_url,
+          video: call.media === 2,
+        });
+      } else {
+        await this.joinCallRoom(call.callId, call.media === 2);
+      }
       this.clearCallTimers();
       // The SFU snapshot may arrive after this transition: seed the roster with
       // our own uid so the caller and callee agree on the head count at once.
       const selfUid = String(this.state.me?.uid ?? '');
-      this.set({
-        call: {
-          ...this.state.call,
-          phase: 'active',
-          startedAt: Date.now(),
-          participants: Array.from(new Set([selfUid, ...this.state.call.participants].filter(Boolean))),
-        },
-      });
+      const participants = Array.from(new Set([selfUid, ...this.state.call.participants].filter(Boolean)));
+      this.set({ call: { ...this.state.call, participants } });
+      if (participants.length > 1) this.markConnected(call.callId);
+      else this.armConnectTimer();
     } catch (err) {
       this.notify(`接听失败：${wrapError(err).display}`, 'error');
       await this.endCall('error');
@@ -3663,24 +3767,13 @@ class ImStore {
       onParticipantJoined: (identity) => {
         const call = this.state.call;
         if (call.callId !== callId) return;
-        // The answered push can be lost (the callee already knows it accepted).
-        // Once the peer is actually in the room, the call is live: promote it
-        // instead of leaving the caller stuck on "正在呼叫".
-        if (call.phase === 'outgoing' || call.phase === 'connecting') {
-          this.clearCallTimers();
-          this.notify('通话已接通');
-          this.set({
-            call: {
-              ...call,
-              phase: 'active',
-              startedAt: call.startedAt || Date.now(),
-              participants: Array.from(new Set([...call.participants, identity])),
-            },
-          });
-          return;
-        }
-        if (!call.participants.includes(identity)) {
-          this.set({ call: { ...call, participants: [...call.participants, identity] } });
+        const selfUid = String(this.state.me?.uid ?? '');
+        const participants = Array.from(new Set([...call.participants, identity]));
+        this.set({ call: { ...call, participants } });
+        // A remote identity in the room means the call is live, regardless of
+        // whether the phase=2 push arrived first (it can be lost).
+        if (identity !== selfUid) {
+          this.markConnected(callId);
         }
       },
       // Authoritative snapshot from the SFU: it also contains the participants
@@ -3694,6 +3787,8 @@ class ImStore {
         const same = next.length === call.participants.length
           && next.every((uid, index) => uid === call.participants[index]);
         if (!same) this.set({ call: { ...call, participants: next } });
+        // Connected + a remote identity present is the "已接通" signal.
+        if (next.some((uid) => uid !== selfUid)) this.markConnected(callId);
       },
       onParticipantLeft: (identity) => {
         const call = this.state.call;
@@ -3721,18 +3816,14 @@ class ImStore {
         void this.endCall('error');
       },
     });
-    try {
-      await callSession.connect(sfuUrlFor(sfuUrl), token, video);
-    } catch (err) {
-      // Joining with an identity that a previous (killed) tab still holds makes
-      // LiveKit close the stale session first and reject this one. Retry once
-      // after the SFU has dropped it.
-      if (!/Client initiated disconnect|duplicate identity/i.test(String(err))) throw err;
-      await new Promise((resolve) => window.setTimeout(resolve, 1800));
-      await callSession.connect(sfuUrlFor(sfuUrl), token, video);
-    }
+    await this.connectMedia(callId, video, token, sfuUrl);
     if (import.meta.env.DEV) console.debug('[zim] call media connected');
     if (this.state.call.callId === callId && this.state.call.phase === 'idle') return;
+    // Media is attached: flag it for every target type so a later phase=2 does
+    // not connect a second time.
+    if (this.state.call.callId === callId && !this.state.call.joined) {
+      this.set({ call: { ...this.state.call, joined: true } });
+    }
     // Group rooms are persistent: the call is active as soon as media is up and
     // keeps its heartbeat. A 1:1 call stays "outgoing"/"connecting" until the
     // peer answers (phase=2 push or the peer's participant-joined event).
@@ -3807,6 +3898,76 @@ class ImStore {
     if (this.state.activeCid) void this.markRead(this.state.activeCid);
     // Re-subscribe on return: the previous subscription may have expired.
     void this.subscribePresence();
+    // The tab may have missed pushes while hidden: reconcile the call sheet.
+    void this.reconcileCall();
+  }
+
+  /**
+   * Compares the local call sheet with the server (1805) after a reconnect or a
+   * return to the foreground, then either re-attaches the SFU or closes a stale
+   * sheet. This is the client-side stand-in for the missing event versioning.
+   */
+  async reconcileCall(): Promise<void> {
+    const call = this.state.call;
+    if (!this.client || call.phase === 'idle' || !call.callId) return;
+    if (isRoomTarget(call.targetType) && call.groupId) {
+      await this.refreshGroupCall(call.groupId);
+      const room = this.state.groupCalls[call.groupId];
+      if (!room || room.callId !== call.callId) {
+        this.notify('通话已结束');
+        await this.endCall('hangup');
+        return;
+      }
+      if (call.phase === 'active' && !callSession.isConnected()) {
+        await this.reconnectMedia(call.callId, call.media === 2);
+      }
+      return;
+    }
+    try {
+      const res = await this.client.request(
+        OP.CALL_STATE,
+        encodeCallStateReq({ callId: call.callId }),
+        decodeCallStateRes,
+      );
+      const state = res.payload;
+      if (!state.active) {
+        this.notify('通话已结束');
+        await this.endCall('hangup');
+        return;
+      }
+      if (Number(state.state) === 2) {
+        if (!callSession.isConnected()) {
+          await this.reconnectMedia(call.callId, call.media === 2);
+        }
+        if (call.participants.length > 1) this.markConnected(call.callId);
+      }
+    } catch (err) {
+      const code = wrapError(err).code;
+      if (code === 180003 || code === 180004) {
+        this.notify('通话已结束');
+        await this.endCall('hangup');
+      }
+    }
+  }
+
+  /** Fetches a fresh token for an answered call and re-attaches the SFU. */
+  private async reconnectMedia(callId: string, video: boolean): Promise<void> {
+    if (!this.client) return;
+    try {
+      const room = await this.client.request(
+        OP.ROOM_TOKEN,
+        encodeRoomTokenReq({ callId }),
+        decodeRoomTokenRes,
+      );
+      if (this.state.call.callId !== callId) return;
+      await this.connectRoom({ callId, token: room.payload.token, sfuUrl: room.payload.sfu_url, video });
+    } catch (err) {
+      const code = wrapError(err).code;
+      if (code === 180003 || code === 180004) {
+        this.notify('通话已结束');
+        await this.endCall('hangup');
+      }
+    }
   }
 
   // ------------------------------------------------------------- reconnect --

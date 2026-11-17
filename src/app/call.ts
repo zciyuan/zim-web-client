@@ -3,7 +3,7 @@
 // Keeps the LiveKit Room out of the React store: the store only tracks the
 // signaling phase, this module owns media tracks and rendering.
 
-import { Room, RoomEvent, Track, VideoPresets, type RemoteTrack } from 'livekit-client';
+import { ConnectionState, Room, RoomEvent, Track, VideoPresets, type RemoteTrack } from 'livekit-client';
 
 export interface CallTrackHandlers {
   /** identities of participants currently speaking (active speaker detection). */
@@ -38,6 +38,11 @@ export class CallSession {
     this.emitTracks();
     this.emitParticipants();
     if (this.handlers.onSpeakers) this.handlers.onSpeakers(this.speakers);
+  }
+
+  /** True while the LiveKit room is connected (used by 1805 reconciliation). */
+  isConnected(): boolean {
+    return Boolean(this.room && this.room.state === ConnectionState.Connected);
   }
 
   /** Joins the SFU room and publishes mic (and camera for video calls). */
