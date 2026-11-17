@@ -350,13 +350,19 @@ const dedupeMessages = (items: UiMessage[]): UiMessage[] => {
 /** RTC call phase shown by the call overlay. */
 export type CallPhase = 'idle' | 'incoming' | 'outgoing' | 'connecting' | 'active';
 
+/** 1 direct / 2 normal group / 3 family group. */
+export type CallTargetType = 1 | 2 | 3;
+
+/** Group-like calls live in a persistent room (join/leave at any time). */
+const isRoomTarget = (target: number): boolean => target === 2 || target === 3;
+
 export interface CallStatus {
   phase: CallPhase;
   callId: string;
   media: 1 | 2;
-  /** 1 direct / 2 group */
-  targetType: 1 | 2;
-  /** group rooms: the group this call belongs to */
+  /** 1 direct / 2 normal group / 3 family group */
+  targetType: CallTargetType;
+  /** group rooms: the group/family this call belongs to */
   groupId: string;
   /** group calls: another member already joined */
   joinedElsewhere: boolean;
@@ -382,9 +388,10 @@ function emptyCall(): CallStatus {
   };
 }
 
-/** A normal group's persistent voice/video room (target_type=2). */
+/** A group-like persistent voice/video room (target_type=2 group, 3 family). */
 export interface GroupCallRoom {
   callId: string;
+  targetType: CallTargetType;
   media: 1 | 2;
   active: boolean;
   /** uids the server reports as participants (best effort). */
@@ -527,6 +534,13 @@ class ImStore {
   groupName(gid: string | number): string {
     const key = roundedKey(gid);
     return this.state.groups.find((item) => roundedKey(item.group_id) === key)?.name ?? '';
+  }
+
+  /** Group kind from the group list: 1 normal, 3 family (0 when unknown). */
+  groupTypeOf(gid: string | number): number {
+    const key = roundedKey(gid);
+    const group = this.state.groups.find((item) => roundedKey(item.group_id) === key);
+    return Number(group?.group_type ?? 0);
   }
 
   senderName(uid: string | number): string {
@@ -2939,6 +2953,9 @@ class ImStore {
         // Normal groups are persistent rooms: 1805 carries their state and no
         // member ever gets a ringing sheet, so ignore a stray group phase=1.
         if (update.target_type === 2) return;
+        // Our own outgoing call can echo phase=1 back to the caller (family
+        // ringing is fanned out to every member): never ring for our own call.
+        if (this.state.call.callId === update.call_id) return;
         // Ringing: the callee shows the incoming call sheet. A second call while
         // one is already live must not hijack the sheet: reject it right away.
         if (this.state.call.phase !== 'idle') {
@@ -2955,8 +2972,10 @@ class ImStore {
             phase: 'incoming',
             callId: update.call_id,
             media: update.media === 2 ? 2 : 1,
-            targetType: update.target_type === 2 ? 2 : 1,
-            groupId: update.target_type === 2 ? String(update.from_uid) : '',
+            targetType: update.target_type === 2 ? 2 : update.target_type === 3 ? 3 : 1,
+            // The family id is not part of CallAnswerRes; the 1805 push/card
+            // carries it once a member answers, so the room can be joined later.
+            groupId: '',
             joinedElsewhere: false,
             joined: false,
             participants: [],
@@ -2977,6 +2996,13 @@ class ImStore {
         if (this.state.call.callId !== update.call_id) return;
         this.clearCallTimers();
         if (this.state.call.phase === 'incoming') {
+          if (this.state.call.targetType === 3) {
+            // Another family member answered: stop ringing here, but stay open
+            // for a late join from the family room bar / call card.
+            this.notify('其他家庭成员已接听');
+            void this.endCall('answered-elsewhere');
+            return;
+          }
           this.set({ call: { ...this.state.call, joinedElsewhere: true } });
           return;
         }
@@ -2996,9 +3022,11 @@ class ImStore {
               startedAt: this.state.call.startedAt || Date.now(),
             },
           });
-          // The caller joined no room while ringing: attach the media session
-          // now that the server accepts tokens for an answered call.
-          if (!this.state.call.joined) {
+          // A 1:1 caller joined no room while ringing: attach the media session
+          // now that the server accepts tokens for an answered call. Group and
+          // family callers join in startGroupCall/startFamilyCall, so a later
+          // phase=2 must not connect a second time.
+          if (!this.state.call.joined && (this.state.call.targetType === 1 || this.state.call.targetType === 3)) {
             void this.joinCallRoom(update.call_id, this.state.call.media === 2).catch((err) => {
               this.notify(`加入通话失败：${wrapError(err).display}`, 'error');
               void this.endCall('error');
@@ -3058,6 +3086,11 @@ class ImStore {
     }
     const peer = isGroup ? this.groupName(peerId) : this.friendProfile(peerId);
     if (isGroup) {
+      // Family groups keep the ringing model but add the join/leave room API.
+      if (this.groupTypeOf(peerId) === 3) {
+        await this.startFamilyCall(media, peerId, peer);
+        return;
+      }
       // Normal groups are persistent rooms: create and join in one step.
       await this.startGroupCall(media, peerId, peer);
       return;
@@ -3184,7 +3217,7 @@ class ImStore {
       return;
     }
     // Group rooms: leaving only removes this member; the last leaver ends it.
-    if (call.targetType === 2 && this.client && (call.phase === 'active' || call.phase === 'connecting')) {
+    if (isRoomTarget(call.targetType) && this.client && (call.phase === 'active' || call.phase === 'connecting')) {
       await this.leaveGroupCall();
       return;
     }
@@ -3203,6 +3236,72 @@ class ImStore {
   }
 
   // ------------------------------------------------------------ group rooms --
+
+  /**
+   * Starts a family call (target.type=3).
+   *
+   * Family keeps the ringing model: members still receive 1802 phase=1 and the
+   * caller gets no token in CallInviteRes, so the room token comes from 1806.
+   * The caller joins right away while the others ring.
+   */
+  private async startFamilyCall(media: 1 | 2, familyId: string, familyName: string): Promise<void> {
+    if (!this.client) return;
+    const callId = randomId();
+    const selfUid = String(this.state.me?.uid ?? '');
+    this.set({
+      call: {
+        ...emptyCall(),
+        phase: 'outgoing',
+        callId,
+        media,
+        targetType: 3,
+        groupId: familyId,
+        participants: selfUid ? [selfUid] : [],
+        peerId: familyId,
+        peerName: familyName,
+        videoOn: media === 2,
+      },
+    });
+    this.armRingTimer();
+    this.armConnectTimer();
+    try {
+      const invite = await this.client.request(
+        OP.CALL_INVITE,
+        encodeCallInviteReq({ callId, targetType: 3, targetId: familyId, media }),
+        decodeCallInviteRes,
+      );
+      // The caller waits for a member to answer (the family still rings). The
+      // backend treats any 1806 join during ringing as "answered", so joining
+      // before phase=2 would stop everyone's ringing before anybody accepted.
+      this.setGroupRoom(familyId, {
+        callId: invite.payload.call_id,
+        targetType: 3,
+        media,
+        active: true,
+        participants: selfUid ? [selfUid] : [],
+        room: invite.payload.room,
+        startedAt: Date.now(),
+      });
+      this.set({
+        call: { ...this.state.call, callId: invite.payload.call_id, room: invite.payload.room },
+      });
+      this.clearConnectTimer();
+    } catch (err) {
+      const wrapped = wrapError(err);
+      if (wrapped.code === 180011) {
+        this.notify('家庭组正在通话中，正在加入');
+        await this.endCall('error');
+        await this.refreshGroupCall(familyId);
+        await this.joinGroupCall(familyId);
+        return;
+      }
+      this.notify(
+        wrapped.code === 130002 ? '你不是该家庭成员' : `发起失败：${explainRtcError(wrapped.display)}`,
+        'error',
+      );
+      await this.endCall('error');
+    }
+  }
 
   /**
    * Starts a normal group's persistent room (1801, target.type=2).
@@ -3237,6 +3336,7 @@ class ImStore {
       const payload = res.payload;
       this.setGroupRoom(groupId, {
         callId: payload.call_id,
+        targetType: 2,
         media: payload.media === 2 ? 2 : media,
         active: true,
         participants: payload.participants,
@@ -3275,11 +3375,11 @@ class ImStore {
     }
   }
 
-  /** Joins the active room of a group (1806 with the group id). */
+  /** Joins the active room of a group or family (1806 with the group id). */
   async joinGroupCall(groupId: string, callId = ''): Promise<void> {
     if (!groupId) return;
     if (this.state.call.phase !== 'idle') {
-      if (this.state.call.targetType === 2 && this.state.call.groupId === groupId) return;
+      if (isRoomTarget(this.state.call.targetType) && this.state.call.groupId === groupId) return;
       this.notify('你正在通话中', 'error');
       return;
     }
@@ -3288,13 +3388,15 @@ class ImStore {
       this.notify(`无法加入：${support.detail}`, 'error');
       return;
     }
+    const room = this.state.groupCalls[groupId];
+    const targetType: CallTargetType = room?.targetType ?? (this.groupTypeOf(groupId) === 3 ? 3 : 2);
     const selfUid = String(this.state.me?.uid ?? '');
     this.set({
       call: {
         ...emptyCall(),
         phase: 'connecting',
         callId,
-        targetType: 2,
+        targetType,
         groupId,
         participants: selfUid ? [selfUid] : [],
         peerId: groupId,
@@ -3311,6 +3413,7 @@ class ImStore {
       const media: 1 | 2 = payload.media === 2 ? 2 : 1;
       this.setGroupRoom(groupId, {
         callId: payload.call_id,
+        targetType: this.state.call.targetType === 3 ? 3 : 2,
         media,
         active: true,
         participants: payload.participants,
@@ -3341,7 +3444,7 @@ class ImStore {
       } else if (wrapped.code === 180008) {
         this.notify('通话人数已满', 'error');
       } else if (wrapped.code === 130002) {
-        this.notify('你不是该群成员', 'error');
+        this.notify(targetType === 3 ? '你不是该家庭成员' : '你不是该群成员', 'error');
         this.clearGroupRoom(groupId);
       } else {
         this.notify(`加入失败：${explainRtcError(wrapped.display)}`, 'error');
@@ -3383,6 +3486,27 @@ class ImStore {
     }
   }
 
+  /**
+   * Drops a stale room mark: sends 1803 for the recorded call (best effort) and
+   * clears the local entry. Used when a previous tab died without leaving.
+   */
+  async clearGroupCall(groupId: string): Promise<void> {
+    const room = this.state.groupCalls[groupId];
+    if (!room) return;
+    if (this.client) {
+      try {
+        await this.client.request(
+          OP.CALL_HANGUP,
+          encodeCallHangupReq({ callId: room.callId, reason: 1, duration: 0 }),
+          decodeCallHangupRes,
+        );
+      } catch {
+        // already ended
+      }
+    }
+    this.clearGroupRoom(groupId);
+  }
+
   /** Queries a group's active room (1805 by group id). */
   async refreshGroupCall(groupId: string): Promise<void> {
     if (!this.client || !groupId) return;
@@ -3414,7 +3538,7 @@ class ImStore {
     if (!active) {
       this.clearGroupRoom(groupId);
       const call = this.state.call;
-      if (call.phase !== 'idle' && call.targetType === 2 && call.groupId === groupId) {
+      if (call.phase !== 'idle' && isRoomTarget(call.targetType) && call.groupId === groupId) {
         this.notify('通话已结束');
         void this.endCall('remote');
       }
@@ -3423,6 +3547,7 @@ class ImStore {
     const media: 1 | 2 = state.media === 2 ? 2 : 1;
     this.setGroupRoom(groupId, {
       callId: state.call_id,
+      targetType: state.target_type === 3 ? 3 : 2,
       media,
       active: true,
       participants: state.participants,
@@ -3596,13 +3721,22 @@ class ImStore {
         void this.endCall('error');
       },
     });
-    await callSession.connect(sfuUrlFor(sfuUrl), token, video);
+    try {
+      await callSession.connect(sfuUrlFor(sfuUrl), token, video);
+    } catch (err) {
+      // Joining with an identity that a previous (killed) tab still holds makes
+      // LiveKit close the stale session first and reject this one. Retry once
+      // after the SFU has dropped it.
+      if (!/Client initiated disconnect|duplicate identity/i.test(String(err))) throw err;
+      await new Promise((resolve) => window.setTimeout(resolve, 1800));
+      await callSession.connect(sfuUrlFor(sfuUrl), token, video);
+    }
     if (import.meta.env.DEV) console.debug('[zim] call media connected');
     if (this.state.call.callId === callId && this.state.call.phase === 'idle') return;
     // Group rooms are persistent: the call is active as soon as media is up and
     // keeps its heartbeat. A 1:1 call stays "outgoing"/"connecting" until the
     // peer answers (phase=2 push or the peer's participant-joined event).
-    if (this.state.call.callId === callId && this.state.call.targetType === 2) {
+    if (this.state.call.callId === callId && isRoomTarget(this.state.call.targetType)) {
       this.set({
         call: {
           ...this.state.call,
@@ -3615,7 +3749,7 @@ class ImStore {
           ].filter(Boolean))),
         },
       });
-      if (this.state.call.targetType === 2) {
+      if (isRoomTarget(this.state.call.targetType)) {
         this.startGroupHeartbeat();
         this.armUnloadLeave();
       }

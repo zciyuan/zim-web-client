@@ -1115,7 +1115,7 @@ export function ChatPanel() {
           <span className="flex min-w-0 items-center gap-1.5" data-group-call-state={inGroupRoom ? 'joined' : 'ongoing'}>
             <span className="inline-block h-2 w-2 shrink-0 animate-pulse rounded-full bg-emerald-500" />
             <span className="truncate">
-              {groupRoom.media === 2 ? '群视频通话中' : '群语音通话中'}
+              {groupRoom.targetType === 3 ? '家庭' : '群'}{groupRoom.media === 2 ? '视频通话中' : '语音通话中'}
               　
               {inGroupRoom ? call.participants.length : Math.max(groupRoom.participants.length, 1)} 人
             </span>
