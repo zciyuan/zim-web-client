@@ -6,6 +6,18 @@
 > 接口契约：`ZIM` 仓库 `docs/ZIM-02-业务与接口规范.md` §2（WS）、§3（REST）。
 > 本仓库是**独立前端工程**，不进 `ZIM` 后端仓。
 
+## 交付形态（重要）
+
+| 端 | 形态 | 状态 |
+|---|---|---|
+| Web | `dist/` 静态托管 + 反向代理 `/v1`、`/ws`、`/rtc` | ✅ 已实现并持续联调（本地 + 线上 `https://120.55.6.180:12004`） |
+| App（PWA） | `manifest.webmanifest` + `sw.js`，浏览器安装到主屏 | ✅ 已内置，随 Web 一起发布 |
+| PC（Tauri 2） | `src-tauri/` 复用同一份 `dist/` | 🟡 **脚手架**：已配置 `devUrl`/`frontendDist`，但需要 Rust 工具链 + `@tauri-apps/cli` 才能真正构建，尚未产出安装包 |
+| App（Capacitor） | `capacitor.config.ts` 指向 `dist/` | 🟡 **脚手架**：需要安装 Capacitor 包并 `cap add android/ios`，尚未生成原生工程 |
+
+> 也就是说：**代码是一套**（业务、协议、UI 全在 `src/`，三端共享），但**交付验证过的只有 Web + PWA**；
+> PC/移动原生壳是预留接口，未构建、未联调。壳层差异（QUIC/WebTransport、原生推送、后台保活、音频会话、权限）见下文。
+
 ## 技术栈
 
 | 层 | 选型 | 说明 |
@@ -13,9 +25,10 @@
 | 框架 | **React 19 + TypeScript 7** | 严格模式（`strict` + 未使用变量报错） |
 | 样式 | **Tailwind CSS v4** | `@tailwindcss/vite`，无 `tailwind.config.js` |
 | 构建 | **Vite 8** | 产物 `dist/`，gzip 后 JS ≈ 83 KB |
-| Web | 直接部署 `dist/` | 静态托管 + `/v1`、`/ws` 反向代理 |
-| PC | **Tauri 2**（或 Electron） | `src-tauri/`，复用同一份 `dist/` |
-| App | **PWA**（已内置 manifest + service worker）/ Capacitor（可选） | `public/manifest.webmanifest`、`capacitor.config.ts` |
+| Web | 直接部署 `dist/` | 静态托管 + `/v1`、`/ws`、`/rtc` 反向代理 |
+| PC | **Tauri 2**（或 Electron） | `src-tauri/`，复用同一份 `dist/`（脚手架，未构建） |
+| App | **PWA**（已内置 manifest + service worker）/ Capacitor（可选） | `public/manifest.webmanifest`、`capacitor.config.ts`（脚手架，未构建） |
+| 传输 | WS（默认）/ QUIC 协商层 | `src/sdk/transport.ts`：解析 `transports`、灰度、200ms 回退；Web 只能 WS |
 
 ## 目录
 
@@ -72,6 +85,9 @@ npm run e2e         # 需要 dev server 与后端栈在跑
 
 ### PC（Tauri 2）
 
+> 状态：**脚手架**（`src-tauri/` 有 `Cargo.toml`/`tauri.conf.json`/图标，但没有 `Cargo.lock`/`target/`，即从未构建）。
+> 本机也没有 Rust 工具链与 `@tauri-apps/cli`。
+
 ```bash
 # 首次需要 Rust 工具链 + 平台依赖：https://tauri.app/start/prerequisites/
 npm install -D @tauri-apps/cli
@@ -94,6 +110,9 @@ npx tauri build    # 产出 Windows .msi/.exe、macOS .app/.dmg
 
 ### App（Capacitor，需要原生能力时）
 
+> 状态：**脚手架**（只有 `capacitor.config.ts`，未安装 `@capacitor/*`，也没有 `android/`、`ios/` 工程）。
+> 原生推送、后台保活、音频会话需要在这一步接。
+
 ```bash
 npm install -D @capacitor/cli && npm install @capacitor/core @capacitor/android @capacitor/ios
 npx cap add android && npx cap add ios
@@ -102,6 +121,20 @@ npx cap open android
 ```
 
 `capacitor.config.ts` 的 `webDir` 已指向 `dist`。原生推送（APNs/FCM）与后台接收仍需厂商通道配置——这部分对应 `ZIM` 的离线推送链路。
+
+## 功能状态（2026-11）
+
+已实现并验证：
+
+- **消息**：单聊/群聊文本、图片、文件、语音、视频附件上传（预签名 PUT）、引用回复、转发/合并转发、撤回/编辑、reaction、会话内搜索、全局搜索、@ 提醒、未读/已读回执、草稿、多选转发、长文折叠、链接识别。
+- **好友/群**：好友申请与审批、备注、黑名单、群创建/改名/公告/成员角色/禁言、群事件 1904 实时刷新、入群申请。
+- **通话**：
+  - 1v1 语音/视频：振铃、接听、拒绝、取消、多端抢接（phase=4）、扬声器/静音/摄像头开关；
+  - 普通群：常驻房间（`target_type=2`），无振铃，横幅/卡片一键加入，`1803` 退出、最后一人结束；
+  - 家庭组：振铃/自动接听保留（`target_type=3`），支持随时加入/退出与 `1805` 房间状态；
+  - 通话前申请麦克风/摄像头权限，摄像头不可用自动降级语音；30s 心跳；页面卸载 best-effort `1803`。
+- **协议/可靠性**：`1801` 即入房（invite token）、`1802 phase=2` token 进房、1805 对账（重连/回前台）、房间花名册看门狗（SFU 信令僵死自愈）、`180009` 换 token 重连。
+- **传输协商**：读取 `transports`、按设备灰度、200ms WebTransport 探测回退；Web 端当前固定 WS（原因见 ADR）。
 
 ## 与 ZIM 后端的契约
 
@@ -118,6 +151,9 @@ npx cap open android
 ## 已知限制
 
 - 历史分页只能前向（`begin_seq/end_seq/limit` 无 `desc`），尾部与"更早"都用窗口扫描，见 `src/sdk/history.ts`。
-- WS 仍以 `token=` 直连（`POST /v1/auth/ws-ticket` 未实现）。
-- 未做：图片/文件上传、RTC 通话页、撤回/编辑 UI、reaction、离线推送角标。
+- 客户端 WS 仍以 `token=` 直连；服务端 `/v1/ws/ticket` 已存在但客户端未改用它。
+- **PC/移动原生壳未构建**：Tauri 需要 Rust 工具链与 `@tauri-apps/cli`；Capacitor 需要安装 `@capacitor/*` 并生成 `android/`、`ios/` 工程。当前没有安装包。
+- **原生平台能力待接**：APNs/FCM 离线推送与角标、后台保活、iOS `AVAudioSession`/Android 音频焦点、原生权限弹窗。
+- **QUIC**：gate 的 QUIC 是 due 自定义协议（ALPN `due-quic`，非 HTTP/3），浏览器无法直连；Web 端要等 WebTransport 网关（HTTP/3 + CONNECT）与 `transports` 下发。
+- **TURN over TLS(443) 未部署**：对称 NAT/4G 下仍可能"接通但无声"。
 - 服务端在 gate/push 重启后可能出现推送路由缓存失效（`not found endpoint`）：重启 `zim-push` 可恢复；`zim-node-msg` 残留绑定会让账号被反复踢下线（`closed 1006`），重启该容器可恢复。
