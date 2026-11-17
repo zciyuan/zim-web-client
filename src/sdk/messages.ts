@@ -29,7 +29,9 @@ export const OP = {
   READ_RECEIPT: 1505,
   RECALL: 1506,
   TYPING: 1517,
+  SUBSCRIBE_ONLINE: 1106,
   PUSH_TYPING: 1908,
+  PUSH_ONLINE: 1903,
   PUSH_FRIEND: 1909,
   ADD_REACTION: 1515,
   REMOVE_REACTION: 1516,
@@ -480,6 +482,45 @@ export const decodeTypingPush = (bytes: Uint8Array): {
     else reader.skip(wire);
   });
   return { conversation_id: conversationId, uid, typing };
+};
+
+/** 1106 SubscribeOnlineReq { repeated int64 uids=1; } */
+export const encodeSubscribeOnlineReq = (uids: Array<string | number>): Uint8Array => {
+  const writer = new Writer();
+  for (const uid of uids.slice(0, 200)) writer.int64(1, uid);
+  return writer.finish();
+};
+
+/** 1106 SubscribeOnlineRes { repeated OnlineUser users=1; } OnlineUser { uid=1; online=2; } */
+export const decodeSubscribeOnlineRes = (bytes: Uint8Array): Record<string, boolean> => {
+  const online: Record<string, boolean> = {};
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field !== 1) {
+      reader.skip(wire);
+      return;
+    }
+    let uid = '0';
+    let onlineFlag = false;
+    decodeFields(reader.bytes(), (inner, innerField, innerWire) => {
+      if (innerField === 1) uid = inner.int64();
+      else if (innerField === 2) onlineFlag = inner.bool();
+      else inner.skip(innerWire);
+    });
+    online[uid] = onlineFlag;
+  });
+  return online;
+};
+
+/** 1903 OnlineChangePush { uid=1; online=2; } */
+export const decodeOnlineChangePush = (bytes: Uint8Array): { uid: string; online: boolean } => {
+  let uid = '0';
+  let online = false;
+  decodeFields(bytes, (reader, field, wire) => {
+    if (field === 1) uid = reader.int64();
+    else if (field === 2) online = reader.bool();
+    else reader.skip(wire);
+  });
+  return { uid, online };
 };
 /** 1909 FriendEventPush { kind=1; from_uid=2; to_uid=3; } */
 export const decodeFriendEventPush = (bytes: Uint8Array): { kind: number; from_uid: string; to_uid: string } => {

@@ -81,15 +81,18 @@ await sleep(1200);
 
 // ---------------------------------------------------------------- presence --
 await alice.bringToFront();
-const presence = await alice.evaluate(async () => {
-  await window.__zim.refreshPresence(['10001', '10002', '10003'], true);
-  return {
-    self: window.__zim.presenceOf('10001'),
-    peer: window.__zim.presenceOf('10002'),
-    absent: window.__zim.presenceOf('10003'),
-  };
-});
-check('presence: api marks online/offline', presence.peer === true && presence.absent === false, JSON.stringify(presence));
+// The 1106 snapshot arrives on its own (no explicit refresh call here).
+let snapshotPeer;
+for (let attempt = 0; attempt < 20; attempt += 1) {
+  snapshotPeer = await alice.evaluate(() => window.__zim.presenceOf('10002'));
+  if (snapshotPeer !== undefined) break;
+  await sleep(400);
+}
+const presence = await alice.evaluate(() => ({
+  self: window.__zim.presenceOf('10001'),
+  peer: window.__zim.presenceOf('10002'),
+}));
+check('presence: 1106 snapshot marks peers online', presence.peer === true, JSON.stringify(presence));
 
 await openDirect(alice);
 const dot = await alice.evaluate(() => document.querySelector('[data-conversation-row="s_10001_10002"] [data-online]')
@@ -184,7 +187,15 @@ check('typing: switching conversation clears the hint', afterLeave.typing === 'f
 
 // ------------------------------------------------------------ call 180001 --
 await bob.evaluate(() => window.__zim.logout());
-await sleep(1500);
+// 1903 push: the peer goes offline without any polling from this side.
+await alice.bringToFront();
+let offlineSeen = false;
+for (let attempt = 0; attempt < 25 && !offlineSeen; attempt += 1) {
+  await sleep(400);
+  offlineSeen = (await alice.evaluate(() => window.__zim.presenceOf('10002'))) === false;
+}
+check('presence: 1903 push flips the peer offline', offlineSeen, `presenceOf(10002)=${await alice.evaluate(() => window.__zim.presenceOf('10002'))}`);
+await sleep(500);
 await openDirect(alice);
 await alice.evaluate(() => window.__zim.startCall(1));
 await sleep(2500);
@@ -233,10 +244,10 @@ check(
 );
 await alice.evaluate(() => window.__zim.cancelCall()).catch(() => undefined);
 
-await alice.screenshot({ path: path.join(OUT, 'presence-typing.png') });
-// Leave cleanly: logout deactivates the device rows this run registered.
-await alice.evaluate(() => window.__zim.logout());
-await bob2.evaluate(() => window.__zim.logout());
+// Screenshot and logout are best effort: the pages may be busy closing calls.
+await alice.screenshot({ path: path.join(OUT, 'presence-typing.png') }).catch(() => undefined);
+await alice.evaluate(() => window.__zim.logout()).catch(() => undefined);
+await bob2.evaluate(() => window.__zim.logout()).catch(() => undefined);
 await browser.close();
 chrome.kill();
 

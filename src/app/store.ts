@@ -22,6 +22,9 @@ import {
   decodeFriendEventPush,
   decodeTypingPush,
   encodeTypingReq,
+  decodeOnlineChangePush,
+  decodeSubscribeOnlineRes,
+  encodeSubscribeOnlineReq,
   decodeSearchMessageRes,
   decodeOperationRes,
   decodeReadReceiptRes,
@@ -380,6 +383,8 @@ class ImStore {
   private typingStopTimer: number | null = null;
   /** uids explicitly requested by a view (e.g. group members dialog). */
   private presenceWatched = new Set<string>();
+  /** Re-subscribe timer while the page is visible (WS subscription TTL is 2min). */
+  private presenceTimer: number | null = null;
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
@@ -720,6 +725,7 @@ class ImStore {
     // Catch up on anything that changed while this client was offline.
     void this.runSync();
     this.startPolling();
+    void this.subscribePresence();
   }
 
   private persistSession(endpoint: string, username: string): void {
@@ -732,6 +738,7 @@ class ImStore {
 
   logout(kicked = false): void {
     this.stopPolling();
+    this.stopPresence();
     // A kicked connection is already gone: skip the logout round-trip.
     if (!kicked) {
       void this.client?.request(OP.LOGOUT, new Uint8Array(0), decodeOperationRes).catch(() => undefined);
@@ -973,9 +980,9 @@ class ImStore {
     } catch {
       // offline or transient: the next tick retries
     }
-    // Presence shares the poll: 20s is inside the 15-30s budget from the spec.
-    // Hidden tabs pause it; onVisible() catches up when the tab comes back.
-    void this.refreshPresence(undefined, false);
+    // Presence is WS-driven (1106 snapshot + 1903 pushes); this poll only
+    // re-subscribes, which also refreshes the 2 minute server-side TTL.
+    void this.subscribePresence();
   }
 
   // ----------------------------------------------------------------- group --
@@ -2055,6 +2062,48 @@ class ImStore {
     }
   }
 
+  /**
+   * 1106: subscribes to the online state of the visible users. The server
+   * answers with a snapshot and then pushes 1903 changes; the subscription
+   * expires after 2 minutes, so it is refreshed while the tab is visible.
+   * Falls back to the HTTP endpoint when the subscription fails.
+   */
+  async subscribePresence(): Promise<void> {
+    if (this.state.status !== 'ready' || !this.client || this.state.connection !== 'open') return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+      this.stopPresence();
+      return;
+    }
+    const uids = Array.from(new Set(this.presenceTargets().filter(Boolean))).slice(0, 200);
+    if (uids.length === 0) return;
+    try {
+      const res = await this.client.request(
+        OP.SUBSCRIBE_ONLINE,
+        encodeSubscribeOnlineReq(uids),
+        decodeSubscribeOnlineRes,
+      );
+      this.set({ presence: { ...this.state.presence, ...res.payload } });
+    } catch {
+      // WS subscription unavailable (old node, transient error): HTTP fallback.
+      await this.refreshPresence(uids, true);
+    }
+    this.armPresenceRefresh();
+  }
+
+  /** Re-subscribes before the 2 minute server-side subscription expires. */
+  private armPresenceRefresh(): void {
+    if (this.presenceTimer !== null) window.clearTimeout(this.presenceTimer);
+    this.presenceTimer = window.setTimeout(() => void this.subscribePresence(), 90_000);
+  }
+
+  /** Drops the subscription refresh loop (tab hidden or logged out). */
+  private stopPresence(): void {
+    if (this.presenceTimer !== null) {
+      window.clearTimeout(this.presenceTimer);
+      this.presenceTimer = null;
+    }
+  }
+
   /** Adds uids a view cares about (group members) to the presence poll. */
   watchPresence(uids: string[]): void {
     let added = false;
@@ -2063,7 +2112,7 @@ class ImStore {
       this.presenceWatched.add(uid);
       added = true;
     }
-    if (added) void this.refreshPresence(uids);
+    if (added) void this.subscribePresence();
   }
 
   /** uids shown with a green dot: friends, direct peers and watched members. */
@@ -2524,6 +2573,14 @@ class ImStore {
         this.notify('收到新的好友申请');
       }
       void this.refreshRelations();
+      return;
+    }
+    if (event.opcode === OP.PUSH_ONLINE) {
+      // 1903: one user's online flag changed (only sent on change).
+      const update = decodeOnlineChangePush(event.payload);
+      if (update.uid) {
+        this.set({ presence: { ...this.state.presence, [update.uid]: update.online } });
+      }
       return;
     }
     if (event.opcode === OP.PUSH_TYPING) {
@@ -3153,10 +3210,14 @@ class ImStore {
   }
 
   onVisible(): void {
-    if (document.visibilityState !== 'visible') return;
+    if (document.visibilityState !== 'visible') {
+      // Hidden tab: stop refreshing the subscription until it comes back.
+      this.stopPresence();
+      return;
+    }
     if (this.state.activeCid) void this.markRead(this.state.activeCid);
-    // Presence is paused while hidden: catch up as soon as the tab is back.
-    void this.refreshPresence();
+    // Re-subscribe on return: the previous subscription may have expired.
+    void this.subscribePresence();
   }
 
   // ------------------------------------------------------------- reconnect --
