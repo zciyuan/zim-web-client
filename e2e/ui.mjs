@@ -670,52 +670,48 @@ const main = async () => {
     { timeout: 20_000 },
   );
 
-  step('group voice call rings every member');
+  step('group voice call opens a persistent room');
   await alice.bringToFront();
   // Use the group list: a fresh group has no conversation row until it gets a message.
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(4)');
   await openRowByLabel(alice, newGroupName, newGroupName, '[aria-label="聊天"] header');
-  const groupCallTarget = await alice.evaluate(() => {
-    const state = window.__zim.getSnapshot();
-    const conversation = (state.conversations ?? []).find((item) => item.conversation_id === state.activeCid);
-    return { cid: state.activeCid, type: conversation?.type, gid: conversation?.group_id, bobConn: null };
-  });
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
       .find((item) => item.textContent === '语音');
     if (!button) throw new Error('group call button missing');
     button.click();
   });
-  assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'group caller should be outgoing');
-  const groupRing = await waitCallPhase(bob, ['incoming']);
+  // Normal groups are persistent rooms: the caller joins at once, nobody rings.
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'group caller joins immediately');
   assert.equal(
-    groupRing,
-    'incoming',
-    `group member should ring (target=${JSON.stringify(groupCallTarget)}, bobConn=${await bob.evaluate(() => window.__zim.getSnapshot().connection)})`,
-  );
-  assert.equal(
-    await bob.evaluate(() => window.__zim.getSnapshot().call.targetType),
+    await alice.evaluate(() => window.__zim.getSnapshot().call.targetType),
     2,
     'group calls carry targetType=2',
   );
   await bob.bringToFront();
-  await bob.evaluate(() => {
-    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
-      .find((item) => item.textContent === '接听');
-    if (!button) throw new Error('group accept button missing');
-    button.click();
+  const groupRoomId = await alice.evaluate(() => {
+    const state = window.__zim.getSnapshot();
+    return String(state.activeCid ?? '').startsWith('g_') ? state.activeCid.slice(2) : '';
   });
-  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'group member should join');
-  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'group caller should be active');
-  // Both parties are in the SFU room: the sheet lists at least two members.
+  await bob.evaluate(async (gid) => {
+    await window.__zim.refresh();
+    window.__zim.openGroup({ group_id: gid, display_id: gid, name: '' });
+  }, groupRoomId);
+  await bob.waitForFunction(() => Boolean(document.querySelector('[data-group-call-action="join"]')), { timeout: 20_000 });
+  await bob.evaluate(() => document.querySelector('[data-group-call-action="join"]')?.click());
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'group member joins from the banner');
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'group caller stays active');
+  // The roster is server-authoritative: the 10s watchdog merges 1805 into the
+  // sheet even when the SFU snapshot lags. Poll with an interval because the
+  // caller tab is hidden while the joiner is in front (rAF does not tick there).
   await alice.waitForFunction(
     () => Number(document.querySelector('[data-participants]')?.getAttribute('data-participants') ?? 0) >= 2,
-    { timeout: 15_000 },
+    { timeout: 30_000, polling: 300 },
   );
   await alice.bringToFront();
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="通话"] button')]
-      .find((item) => item.textContent === '挂断');
+      .find((item) => item.textContent === '退出');
     if (!button) throw new Error('group hangup button missing');
     button.click();
   });
@@ -745,17 +741,20 @@ const main = async () => {
     if (!button) throw new Error('group video button missing');
     button.click();
   });
-  assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'video caller should be outgoing');
-  assert.equal(await waitCallPhase(bob, ['incoming']), 'incoming', 'video callee should ring');
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'video room caller joins immediately');
   await bob.bringToFront();
-  await bob.evaluate(() => {
-    const button = [...document.querySelectorAll('[aria-label="通话"] button')]
-      .find((item) => item.textContent === '接听');
-    if (!button) throw new Error('video accept button missing');
-    button.click();
+  const videoRoomId = await alice.evaluate(() => {
+    const state = window.__zim.getSnapshot();
+    return String(state.activeCid ?? '').startsWith('g_') ? state.activeCid.slice(2) : '';
   });
-  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'video callee should join');
-  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'video caller should be active');
+  await bob.evaluate(async (gid) => {
+    await window.__zim.refresh();
+    window.__zim.openGroup({ group_id: gid, display_id: gid, name: '' });
+  }, videoRoomId);
+  await bob.waitForFunction(() => Boolean(document.querySelector('[data-group-call-action="join"]')), { timeout: 20_000 });
+  await bob.evaluate(() => document.querySelector('[data-group-call-action="join"]')?.click());
+  assert.equal(await waitCallPhase(bob, ['active']), 'active', 'video member joins from the banner');
+  assert.equal(await waitCallPhase(alice, ['active']), 'active', 'video caller stays active');
   await alice.bringToFront();
   await alice.waitForFunction(
     () => document.querySelectorAll('[data-video-tile]').length >= 2,
@@ -770,7 +769,7 @@ const main = async () => {
   await alice.screenshot({ path: path.join(OUT, '24-video-grid.png') });
   await alice.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="通话"] button')]
-      .find((item) => item.textContent === '挂断');
+      .find((item) => item.textContent === '退出');
     if (!button) throw new Error('video hangup button missing');
     button.click();
   });

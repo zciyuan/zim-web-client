@@ -424,6 +424,11 @@ class ImStore {
   private presenceTimer: number | null = null;
   /** Group rooms: 1807 heartbeat while the user stays in the SFU room. */
   private groupHeartbeatTimer: number | null = null;
+  /** room roster watchdog (10s) and its stale-SFU counter */
+  private rosterTimer: number | null = null;
+  private staleRosterTicks = 0;
+  /** Server-known roster for the current room (1805); merged into the sheet. */
+  private roomRoster: string[] = [];
   /** Group rooms: best-effort 1803 when the tab goes away. */
   private unloadLeaveHandler: (() => void) | null = null;
   private toastSeq = 0;
@@ -3729,6 +3734,73 @@ class ImStore {
     }
   }
 
+  /**
+   * Room roster watchdog.
+   *
+   * The SFU participant snapshot can lag or go stale (half-dead signalling
+   * socket) while the call is otherwise fine: the sheet then keeps showing a
+   * single member. Every 10s the server roster (1805) is merged into the sheet,
+   * and a room that never sees the remote member is re-attached once.
+   */
+  private startRosterWatchdog(): void {
+    this.stopRosterWatchdog();
+    this.staleRosterTicks = 0;
+    this.rosterTimer = window.setInterval(() => void this.syncRoomRoster(), 10_000);
+  }
+
+  private stopRosterWatchdog(): void {
+    if (this.rosterTimer !== null) {
+      window.clearInterval(this.rosterTimer);
+      this.rosterTimer = null;
+    }
+    this.staleRosterTicks = 0;
+  }
+
+  private async syncRoomRoster(): Promise<void> {
+    const call = this.state.call;
+    if (!this.client || !call.callId || !call.groupId || !isRoomTarget(call.targetType)) return;
+    if (call.phase !== 'active') return;
+    let roster: string[] = [];
+    try {
+      const res = await this.client.request(
+        OP.CALL_STATE,
+        encodeCallStateReq({ groupId: call.groupId }),
+        decodeCallStateRes,
+      );
+      if (!res.payload.active) {
+        this.notify('通话已结束');
+        await this.endCall('hangup');
+        return;
+      }
+      roster = res.payload.participants.map(String);
+    } catch (err) {
+      const code = wrapError(err).code;
+      if (code === 180003 || code === 180004) {
+        this.notify('通话已结束');
+        await this.endCall('hangup');
+      }
+      return;
+    }
+    const selfUid = String(this.state.me?.uid ?? '');
+    const merged = Array.from(new Set([selfUid, ...roster].filter(Boolean)));
+    this.roomRoster = roster;
+    if (merged.length > this.state.call.participants.length) {
+      this.set({ call: { ...this.state.call, participants: merged } });
+    }
+    const remoteOnServer = roster.some((uid) => uid !== selfUid);
+    const remoteOnSfu = callSession.debug().participants.length;
+    if (remoteOnServer && remoteOnSfu === 0) {
+      this.staleRosterTicks += 1;
+      if (this.staleRosterTicks >= 2) {
+        this.staleRosterTicks = 0;
+        if (import.meta.env.DEV) console.debug('[zim] stale sfu roster, re-attaching media');
+        await this.reconnectMedia(call.callId, call.media === 2);
+      }
+    } else {
+      this.staleRosterTicks = 0;
+    }
+  }
+
   /** Best-effort leave when the page is closed (the socket may die first). */
   private armUnloadLeave(): void {
     this.disarmUnloadLeave();
@@ -3827,7 +3899,10 @@ class ImStore {
         const call = this.state.call;
         if (call.callId !== callId) return;
         const selfUid = String(this.state.me?.uid ?? '');
-        const next = Array.from(new Set([selfUid, ...identities].filter(Boolean)));
+        // The SFU snapshot can be stale (half-dead signalling): union it with
+        // the server roster so the sheet never loses a member that 1805 knows.
+        const known = isRoomTarget(call.targetType) ? this.roomRoster : [];
+        const next = Array.from(new Set([selfUid, ...identities, ...known].filter(Boolean)));
         const same = next.length === call.participants.length
           && next.every((uid, index) => uid === call.participants[index]);
         if (!same) this.set({ call: { ...call, participants: next } });
@@ -3846,6 +3921,7 @@ class ImStore {
           return;
         }
         if (!identity) return;
+        this.roomRoster = this.roomRoster.filter((uid) => uid !== identity);
         const remaining = call.participants.filter((uid) => uid !== identity);
         this.set({ call: { ...call, participants: remaining } });
         const selfUid = String(this.state.me?.uid ?? '');
@@ -3886,6 +3962,7 @@ class ImStore {
       });
       if (isRoomTarget(this.state.call.targetType)) {
         this.startGroupHeartbeat();
+        this.startRosterWatchdog();
         this.armUnloadLeave();
       }
     }
@@ -3894,6 +3971,7 @@ class ImStore {
   private async endCall(_reason: string): Promise<void> {
     this.clearCallTimers();
     this.stopGroupHeartbeat();
+    this.stopRosterWatchdog();
     this.disarmUnloadLeave();
     await callSession.end().catch(() => undefined);
     this.set({ call: emptyCall() });
