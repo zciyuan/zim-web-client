@@ -13,6 +13,7 @@ if (!container) throw new Error('#root is missing');
 if (import.meta.env.DEV) {
   (window as unknown as { __zim?: unknown }).__zim = imStore;
   (window as unknown as { __zimCall?: unknown }).__zimCall = callSession;
+  (window as unknown as { __zimPush?: unknown }).__zimPush = (opcode: number, payload: Uint8Array) => imStore.devPush(opcode, payload);
 }
 
 createRoot(container).render(

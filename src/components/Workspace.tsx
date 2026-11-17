@@ -614,7 +614,11 @@ function Sidebar() {
                             onClick={() => void imStore.openConversation(conversation.conversation_id)}
                             className="flex w-full items-center gap-2.5 rounded-xl p-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-slate-800/60"
                           >
-                            <Avatar name={name} seed={conversation.conversation_id} />
+                            <Avatar
+                              name={name}
+                              seed={conversation.conversation_id}
+                              online={conversation.type === 1 ? imStore.presenceOf(conversation.peer_id) : undefined}
+                            />
                             <span className="min-w-0 flex-1">
                               <span className="flex items-baseline justify-between gap-2">
                                 <span data-row-title className="truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">{name}</span>
@@ -699,7 +703,11 @@ function Sidebar() {
                       active ? 'bg-indigo-50 dark:bg-indigo-950/60' : 'hover:bg-slate-50 dark:hover:bg-slate-800/60'
                     }`}
                   >
-                    <Avatar name={name} seed={conversation.conversation_id} />
+                    <Avatar
+                      name={name}
+                      seed={conversation.conversation_id}
+                      online={conversation.type === 1 ? imStore.presenceOf(conversation.peer_id) : undefined}
+                    />
                     <span className="min-w-0 flex-1">
                       <span className="flex items-baseline justify-between gap-2">
                         <span
@@ -817,7 +825,7 @@ function Sidebar() {
                 const name = friend.remark || friend.profile?.nickname || friend.profile?.username || `用户 ${uid}`;
                 return (
                   <div key={uid} className="group flex items-center gap-2.5 rounded-xl p-2.5 transition hover:bg-slate-50 dark:hover:bg-slate-800/60">
-                    <Avatar name={name} seed={uid} />
+                    <Avatar name={name} seed={uid} online={imStore.presenceOf(uid)} />
                     <button type="button" className="min-w-0 flex-1 text-left" onClick={() => imStore.openFriend(friend)}>
                       <span className="flex items-baseline gap-1 truncate text-[13.5px] font-semibold text-slate-900 dark:text-slate-100">
                         <span data-row-title className="truncate">{name}</span>

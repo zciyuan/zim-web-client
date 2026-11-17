@@ -57,6 +57,8 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
       setNotice(info?.notification ?? '');
       setMembers(list);
       setMemberOffset(list.length);
+      // Member rows show a presence dot: keep those uids in the poll set.
+      imStore.watchPresence(list.map((member) => String(member.user_id)));
     } catch (err) {
       setError(errorText(err));
     }
@@ -114,7 +116,7 @@ export function GroupSettingsDialog({ open, gid, onClose }: GroupSettingsDialogP
         data-member-role={member.role ?? 0}
         className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/60"
       >
-        <Avatar name={name} seed={member.user_id} size={28} />
+        <Avatar name={name} seed={member.user_id} size={28} online={imStore.presenceOf(member.user_id)} />
         <span className="min-w-0 flex-1 truncate text-[13px]">{name}</span>
         {isOwner || isGroupAdmin ? (
           <span

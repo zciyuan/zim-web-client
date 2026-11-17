@@ -170,6 +170,8 @@ export interface ImState {
   connection: ConnectionState;
   /** conversation id -> who is typing and until when (ms) */
   typing: Record<string, { uid: string; until: number }>;
+  /** uid -> online flag (at least one device), refreshed by the presence poll */
+  presence: Record<string, boolean>;
   /** desktop notifications enabled and permitted */
   notifications: boolean;
   /** color theme preference */
@@ -225,6 +227,7 @@ const initialState: ImState = {
   authError: '',
   connection: 'idle',
   typing: {},
+  presence: {},
   peerReads: {},
   notifications: typeof localStorage !== 'undefined' && localStorage.getItem('zim.notifications') === '1',
   theme: (typeof localStorage !== 'undefined' ? (localStorage.getItem('zim.theme') as ThemeMode | null) : null) ?? 'system',
@@ -373,6 +376,10 @@ class ImStore {
   private seenPushes = new Set<string>();
   private pollTimer: number | null = null;
   private lastTypingSentAt = 0;
+  /** Sends typing=false once the composer goes quiet (or the chat is left). */
+  private typingStopTimer: number | null = null;
+  /** uids explicitly requested by a view (e.g. group members dialog). */
+  private presenceWatched = new Set<string>();
   private toastSeq = 0;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private restorePromise: Promise<void> | null = null;
@@ -819,6 +826,16 @@ class ImStore {
   }
 
   async openConversation(cid: string): Promise<void> {
+    // Leaving a chat must clear our own typing flag on the old conversation,
+    // otherwise the peer keeps seeing "正在输入…" for up to 5 seconds.
+    if (this.state.activeCid && this.state.activeCid !== cid) {
+      if (this.typingStopTimer !== null) {
+        window.clearTimeout(this.typingStopTimer);
+        this.typingStopTimer = null;
+      }
+      if (this.lastTypingSentAt) this.sendTyping(this.state.activeCid, false);
+      this.lastTypingSentAt = 0;
+    }
     if (this.state.activeCid !== cid) this.set({ searchHighlight: '' });
     this.set({ activeCid: cid, tab: this.state.tab === 'friends' || this.state.tab === 'groups' ? 'conversations' : this.state.tab });
     const conversation = this.conversation(cid);
@@ -956,6 +973,9 @@ class ImStore {
     } catch {
       // offline or transient: the next tick retries
     }
+    // Presence shares the poll: 20s is inside the 15-30s budget from the spec.
+    // Hidden tabs pause it; onVisible() catches up when the tab comes back.
+    void this.refreshPresence(undefined, false);
   }
 
   // ----------------------------------------------------------------- group --
@@ -1700,6 +1720,8 @@ class ImStore {
   async sendMessage(text: string, atUids: string[] = []): Promise<void> {
     const content = text.trim();
     if (!content) return;
+    // Sending ends the "typing" state for the peer immediately.
+    this.stopTyping();
     // A pending quote target turns the next text into a 1504 reply.
     if (this.state.quoteTarget) {
       await this.sendQuote(content);
@@ -1975,16 +1997,85 @@ class ImStore {
     this.set({ quoteTarget: message });
   }
 
-  /** 1517: tells the other side that this user is typing (throttled to 3s). */
+  /** 1517: tells the other side that this user is typing (throttled to 2s). */
   notifyTyping(): void {
     const cid = this.state.activeCid;
     if (!cid || !this.client || this.state.connection !== 'open') return;
     const now = Date.now();
-    if (this.lastTypingSentAt && now - this.lastTypingSentAt < 3000) return;
-    this.lastTypingSentAt = now;
+    if (!this.lastTypingSentAt || now - this.lastTypingSentAt >= 2000) {
+      this.lastTypingSentAt = now;
+      this.sendTyping(cid, true);
+    }
+    // 3s without a keystroke means "stopped typing".
+    if (this.typingStopTimer !== null) window.clearTimeout(this.typingStopTimer);
+    this.typingStopTimer = window.setTimeout(() => this.stopTyping(), 3000);
+  }
+
+  /** Sends typing=false for the current conversation and resets the throttle. */
+  stopTyping(): void {
+    if (this.typingStopTimer !== null) {
+      window.clearTimeout(this.typingStopTimer);
+      this.typingStopTimer = null;
+    }
+    const cid = this.state.activeCid;
+    this.lastTypingSentAt = 0;
+    if (cid) this.sendTyping(cid, false);
+  }
+
+  /** Fire-and-forget 1517 for one conversation. */
+  private sendTyping(cid: string, typing: boolean): void {
+    if (!this.client || this.state.connection !== 'open') return;
     void this.client
-      .request(OP.TYPING, encodeTypingReq({ conversationId: cid, typing: true }), decodeOperationRes)
+      .request(OP.TYPING, encodeTypingReq({ conversationId: cid, typing }), decodeOperationRes)
       .catch(() => undefined);
+  }
+
+  /** Online flag for a uid (undefined until the first presence answer). */
+  presenceOf(uid: string | number): boolean | undefined {
+    return this.state.presence[String(uid)];
+  }
+
+  /**
+   * Refreshes presence for the given uids (default: friends + direct peers).
+   * The API returns at most 200 uids per call, so the list is capped.
+   */
+  async refreshPresence(uids?: string[], force = true): Promise<void> {
+    if (this.state.status !== 'ready') return;
+    // Polling passes force=false so a hidden tab stays quiet; explicit calls
+    // (tab visible again, tests, dialogs) always refresh.
+    if (!force && typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    const targets = uids ?? this.presenceTargets();
+    const unique = Array.from(new Set(targets.filter(Boolean))).slice(0, 200);
+    if (unique.length === 0) return;
+    try {
+      const online = await this.rest.presence(unique);
+      this.set({ presence: { ...this.state.presence, ...online } });
+    } catch {
+      // offline/transient: the next poll retries
+    }
+  }
+
+  /** Adds uids a view cares about (group members) to the presence poll. */
+  watchPresence(uids: string[]): void {
+    let added = false;
+    for (const uid of uids) {
+      if (!uid || this.presenceWatched.has(uid)) continue;
+      this.presenceWatched.add(uid);
+      added = true;
+    }
+    if (added) void this.refreshPresence(uids);
+  }
+
+  /** uids shown with a green dot: friends, direct peers and watched members. */
+  private presenceTargets(): string[] {
+    const uids = new Set<string>(this.presenceWatched);
+    for (const friend of this.state.friends) uids.add(String(friend.friend_id));
+    for (const conversation of this.state.conversations) {
+      if (conversation.type === 1 && conversation.peer_id && conversation.peer_id !== '0') {
+        uids.add(String(conversation.peer_id));
+      }
+    }
+    return [...uids];
   }
 
   /** 1504: sends a reply that quotes the target message. */
@@ -2440,7 +2531,8 @@ class ImStore {
       if (update.conversation_id) {
         const next = { ...this.state.typing };
         if (update.typing) {
-          next[update.conversation_id] = { uid: update.uid, until: Date.now() + 4000 };
+          // One entry per conversation: the latest sender wins (group chats).
+          next[update.conversation_id] = { uid: update.uid, until: Date.now() + 5000 };
           window.setTimeout(() => {
             const current = this.state.typing[update.conversation_id];
             if (current && current.until <= Date.now()) {
@@ -2448,7 +2540,7 @@ class ImStore {
               delete cleared[update.conversation_id];
               this.set({ typing: cleared });
             }
-          }, 4200);
+          }, 5200);
         } else {
           delete next[update.conversation_id];
         }
@@ -2749,12 +2841,21 @@ class ImStore {
         }
         break;
       case 3:
-        // Rejected / busy from the far end. Ignore it when this side already
-        // ended the call: both ends run the same ring timeout.
+        // Rejected by the callee (180002 family: phase=3 means "declined").
+        // Ignore it when this side already ended the call: both ends run the
+        // same ring timeout.
         if (this.state.call.callId !== update.call_id || this.state.call.phase === 'idle') return;
         this.clearCallTimers();
-        this.notify('对方忙线中', 'error');
-        void this.endCall('busy');
+        this.notify('对方已拒绝', 'error');
+        void this.endCall('rejected');
+        break;
+      case 4:
+        // Another device of the callee answered: stop ringing here.
+        if (this.state.call.callId !== update.call_id) return;
+        if (this.state.call.phase !== 'incoming' && this.state.call.phase !== 'connecting') return;
+        this.clearCallTimers();
+        this.notify('已在其他设备接听');
+        void this.endCall('answered-elsewhere');
         break;
       default:
         break;
@@ -2824,7 +2925,12 @@ class ImStore {
       // connect timer must not end the call before someone answers.
       this.clearConnectTimer();
     } catch (err) {
-      this.notify(`呼叫失败：${explainRtcError(wrapError(err).display)}`, 'error');
+      const wrapped = wrapError(err);
+      // 180001: the callee has no online device, the room was never joined.
+      this.notify(
+        wrapped.code === 180001 ? '对方不在线，无法呼叫' : `呼叫失败：${explainRtcError(wrapped.display)}`,
+        'error',
+      );
       await this.endCall('error');
     }
   }
@@ -3037,9 +3143,20 @@ class ImStore {
   }
 
   /** Re-marks the open conversation when the tab becomes visible again. */
+  /**
+   * Dev-only push injection: lets the automation harness exercise server
+   * pushes that need a second device (e.g. phase=4 answered elsewhere).
+   */
+  devPush(opcode: number, payload: Uint8Array): void {
+    if (!import.meta.env.DEV) return;
+    void this.handlePush({ opcode, payload, code: 0, message: '' });
+  }
+
   onVisible(): void {
     if (document.visibilityState !== 'visible') return;
     if (this.state.activeCid) void this.markRead(this.state.activeCid);
+    // Presence is paused while hidden: catch up as soon as the tab is back.
+    void this.refreshPresence();
   }
 
   // ------------------------------------------------------------- reconnect --

@@ -233,6 +233,15 @@ export class IMHttp {
       .then((data) => data.users ?? []);
   }
 
+  /** Online flags for up to 200 uids (true when at least one device is online). */
+  presence(uids: string[]): Promise<Record<string, boolean>> {
+    const unique = Array.from(new Set(uids.filter(Boolean))).slice(0, 200);
+    if (unique.length === 0) return Promise.resolve({});
+    return this.send<{ online: Record<string, boolean> }>('GET', '/v1/users/presence', {
+      params: { uids: unique.join(',') },
+    }).then((data) => data.online ?? {});
+  }
+
   // -------------------------------------------------------------- relation --
 
   friends(): Promise<Friend[]> {

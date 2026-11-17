@@ -902,12 +902,15 @@ export function ChatPanel() {
   }
 
   const title = imStore.conversationTitle(conversation);
-  const typingUntil = state.typing[conversation?.conversation_id ?? '']?.until ?? 0;
-  const subtitle = typingUntil > Date.now()
-    ? (isGroup ? '有人正在输入…' : '对方正在输入…')
+  const typingEntry = state.typing[conversation?.conversation_id ?? ''];
+  const typingUntil = typingEntry?.until ?? 0;
+  const typing = typingUntil > Date.now();
+  const peerOnline = !isGroup && conversation ? imStore.presenceOf(conversation.peer_id) : undefined;
+  const subtitle = typing
+    ? (isGroup ? `${imStore.senderName(typingEntry?.uid ?? '') || '有人'} 正在输入…` : '对方正在输入…')
     : isGroup
       ? `群 ${conversation.group_id} · 会话 ${conversation.conversation_id}`
-      : `用户 ${conversation.peer_id} · 会话 ${conversation.conversation_id}`;
+      : `用户 ${conversation.peer_id} · ${peerOnline === undefined ? '会话' : peerOnline ? '在线' : '离线'} · ${conversation.conversation_id}`;
 
   return (
     <section
@@ -964,7 +967,7 @@ export function ChatPanel() {
           </button>
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-slate-900 dark:text-slate-100">{title}</h2>
-            <p className="truncate text-[11px] text-slate-500" data-typing={typingUntil > Date.now() ? 'true' : 'false'}>
+            <p className="truncate text-[11px] text-slate-500" data-typing={typing ? 'true' : 'false'} data-peer-online={peerOnline === undefined ? undefined : String(peerOnline)}>
               {subtitle}
             </p>
           </div>
