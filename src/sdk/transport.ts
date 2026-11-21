@@ -1,18 +1,15 @@
 // Transport negotiation for the ZIM client.
 //
-// The gate exposes two wire endpoints:
-//   * WebSocket (`wss://host/ws`), the only transport a browser can dial today;
-//   * a raw QUIC listener (`udp://host:12000`) whose ALPN is a custom due
-//     protocol, not HTTP/3. Browsers have no API for raw QUIC/ALPN, so the web
-//     client can never use it directly — native apps can.
+// The gate exposes three wire endpoints:
+//   * WebSocket (`wss://host/ws`) — universal fallback;
+//   * a raw QUIC listener (`udp://host:12000`, ALPN due-quic) — native apps only;
+//   * a WebTransport endpoint (`https://host:12001/wt`, HTTP/3 + CONNECT) — the
+//     QUIC-family transport browsers and WebViews can actually dial.
 //
-// `transports` may be published through /v1/client-config (or later through
-// /v1/ws/ticket). This module parses it, applies the gray ratio, and decides
-// which transport the browser should use. WebTransport is the only QUIC-family
-// option a browser could use, and it needs a server-side WebTransport gateway
-// (HTTP/3 + CONNECT) that the gate does not expose yet: until then the decision
-// stays `ws` with an explicit reason, so the contract's 200ms fallback and
-// rollout metrics are already in place.
+// `GET /v1/ws/ticket` returns `{ticket, transports}`. The client picks
+// WebTransport when it is advertised, the browser supports it, the device is in
+// the gray ratio, and its 200ms handshake succeeds; otherwise it falls back to
+// WS and records why. The frame stream is identical on both transports.
 
 export type TransportType = 'ws' | 'webtransport' | 'quic';
 
@@ -29,7 +26,7 @@ export interface TransportOption {
 }
 
 export interface TransportDecision {
-  kind: 'ws' | 'webtransport';
+  kind: 'ws' | 'webtransport' | 'quic';
   reason: string;
   option?: TransportOption;
   /** stable 0-99 bucket of this device/account (gray rollout). */
@@ -41,6 +38,9 @@ export interface TransportStats {
   webtransportProbes: number;
   webtransportOk: number;
   webtransportFailures: number;
+  nativeQuicProbes: number;
+  nativeQuicOk: number;
+  nativeQuicFailures: number;
   fallbacks: number;
   lastRttMs: number;
   lastReason: string;
@@ -51,6 +51,9 @@ export const transportStats: TransportStats = {
   webtransportProbes: 0,
   webtransportOk: 0,
   webtransportFailures: 0,
+  nativeQuicProbes: 0,
+  nativeQuicOk: 0,
+  nativeQuicFailures: 0,
   fallbacks: 0,
   lastRttMs: 0,
   lastReason: '',
@@ -106,16 +109,46 @@ export const webTransportSupported = (): boolean =>
   typeof (globalThis as { WebTransport?: unknown }).WebTransport !== 'undefined';
 
 export const webTransportGatewayUrl = (option: TransportOption): string => {
-  if (option.url) return option.url;
-  if (!option.addr) return '';
-  // The contract gives host:port for the QUIC listener; WebTransport shares the
-  // UDP port on an https origin.
-  return `https://${option.addr}`;
+  const raw = option.url ?? (option.addr ? `https://${option.addr}` : '');
+  if (!raw) return '';
+  try {
+    const url = new URL(raw);
+    // The gate serves WebTransport on /wt; tolerate an origin-only advertisement.
+    if (!url.pathname || url.pathname === '/') url.pathname = '/wt';
+    return url.toString();
+  } catch {
+    return raw;
+  }
+};
+
+/** Builds the CONNECT URL with the one-shot ticket (or a direct token). */
+export const buildWebTransportUrl = (options: {
+  url: string;
+  ticket?: string;
+  token?: string;
+  platform?: number;
+  sdk?: string;
+}): string => {
+  const url = new URL(options.url);
+  if (options.ticket) url.searchParams.set('ticket', options.ticket);
+  else if (options.token) url.searchParams.set('token', options.token);
+  url.searchParams.set('platform', String(options.platform ?? 4));
+  url.searchParams.set('sdk', options.sdk ?? 'web-2.0.0');
+  return url.toString();
 };
 
 /** Picks the transport for this device. Never throws. */
-export const decideTransport = (options: TransportOption[], seed: string): TransportDecision => {
+export const decideTransport = (
+  options: TransportOption[],
+  seed: string,
+  capabilities: { nativeQuic?: boolean } = {},
+): TransportDecision => {
   const bucket = transportBucket(seed);
+  const quic = options.find((option) => option.type === 'quic'
+    && (option.ratio === undefined || bucket < option.ratio));
+  if (quic && capabilities.nativeQuic) {
+    return { kind: 'quic', reason: 'quic-ready', option: quic, bucket };
+  }
   const webtransport = options.find((option) => {
     if (option.type !== 'webtransport') return false;
     return option.ratio === undefined || bucket < option.ratio;
@@ -128,12 +161,15 @@ export const decideTransport = (options: TransportOption[], seed: string): Trans
     if (!url) {
       return { kind: 'ws', reason: 'webtransport-url-missing', option: webtransport, bucket };
     }
-    // The browser transport itself is not shipped yet: the gate still speaks a
-    // custom QUIC protocol (ALPN due-quic), not WebTransport/HTTP3.
-    return { kind: 'ws', reason: 'webtransport-not-implemented', option: webtransport, bucket };
+    try {
+      if (new URL(url).protocol !== 'https:') {
+        return { kind: 'ws', reason: 'webtransport-insecure', option: webtransport, bucket };
+      }
+    } catch {
+      return { kind: 'ws', reason: 'webtransport-url-invalid', option: webtransport, bucket };
+    }
+    return { kind: 'webtransport', reason: 'webtransport-ready', option: webtransport, bucket };
   }
-  const quic = options.find((option) => option.type === 'quic'
-    && (option.ratio === undefined || bucket < option.ratio));
   if (quic) {
     return { kind: 'ws', reason: 'quic-native-only', option: quic, bucket };
   }
@@ -198,4 +234,28 @@ export const recordDecision = (decision: TransportDecision): TransportDecision =
   transportStats.lastReason = decision.reason;
   if (decision.kind === 'ws' && decision.option) transportStats.fallbacks += 1;
   return decision;
+};
+
+/** Records one real WebTransport dial (not the preflight probe). */
+export const recordWebTransportAttempt = (ok: boolean, ms: number, reason: string): void => {
+  transportStats.webtransportProbes += 1;
+  if (ok) transportStats.webtransportOk += 1;
+  else transportStats.webtransportFailures += 1;
+  transportStats.lastRttMs = ms;
+  transportStats.lastReason = reason;
+};
+
+/** Records one native raw-QUIC dial. */
+export const recordNativeQuicAttempt = (ok: boolean, ms: number, reason: string): void => {
+  transportStats.nativeQuicProbes += 1;
+  if (ok) transportStats.nativeQuicOk += 1;
+  else transportStats.nativeQuicFailures += 1;
+  transportStats.lastRttMs = ms;
+  transportStats.lastReason = reason;
+};
+
+/** Records a fallback from the advertised transport to WebSocket. */
+export const recordTransportFallback = (reason: string): void => {
+  transportStats.fallbacks += 1;
+  transportStats.lastReason = reason;
 };

@@ -18,10 +18,48 @@ body,
   height: 100%;
 }
 
+/* Dynamic viewport height avoids the iOS/Android browser bar jump. */
+#root {
+  height: 100dvh;
+}
+
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
 body {
   margin: 0;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Shell frame: keeps content out of the notch/status bar in landscape too. */
+.zim-shell {
+  padding-top: var(--safe-top);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+}
+
+.zim-tabbar {
+  padding-bottom: var(--safe-bottom);
+}
+
+.zim-composer {
+  padding-bottom: calc(0.75rem + var(--safe-bottom));
+}
+
+/* iOS zooms into focused inputs whose font-size is under 16px. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }
 
 /* Search / quote jump highlight. */

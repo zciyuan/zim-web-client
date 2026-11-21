@@ -4,6 +4,8 @@ import { Avatar } from './Avatar';
 import { EmojiPicker } from './EmojiPicker';
 import { GroupSettingsDialog } from './GroupSettingsDialog';
 import { errorText, imStore, useIm, type UiMessage } from '../app/store';
+import { describeAudioInputFailure, openAudioInput } from '../app/media-devices';
+import { useMediaQuery } from '../platform';
 import { atOf, attachmentOf, formatBytes, formatDuration, groupCallCard, mentionsUser, mergeOf, quoteOf, uploadOf } from '../app/format';
 import { daySeparator, formatClock, imageOf, messageText } from '../app/format';
 
@@ -508,6 +510,7 @@ function Bubble({
 
 function Composer({ disabled }: { disabled: boolean }) {
   const state = useIm();
+  const compact = useMediaQuery('(max-width: 767px)');
   const quote = state.quoteTarget;
   const [value, setValue] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
@@ -592,8 +595,16 @@ function Composer({ disabled }: { disabled: boolean }) {
       imStore.notify('当前浏览器不支持录音', 'error');
       return;
     }
+    // Same probe as calls: the browser default can be a stale device id, so the
+    // recorder uses whatever input actually opened.
+    const mic = await openAudioInput();
+    if (!mic.ok || !mic.stream) {
+      imStore.notify(describeAudioInputFailure(mic), 'error');
+      return;
+    }
+    if (mic.recovered) imStore.notify(`已切换可用的麦克风${mic.label ? `：${mic.label}` : ''}`);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = mic.stream;
       const recorder = new MediaRecorder(stream);
       const chunks: Blob[] = [];
       recorder.ondataavailable = (event) => {
@@ -603,7 +614,8 @@ function Composer({ disabled }: { disabled: boolean }) {
       setRecordSeconds(0);
       setRecording({ recorder, chunks, startedAt: Date.now() });
     } catch {
-      imStore.notify('麦克风不可用，请检查浏览器权限', 'error');
+      mic.stream.getTracks().forEach((track) => track.stop());
+      imStore.notify('录音启动失败，请检查麦克风', 'error');
     }
   };
 
@@ -701,7 +713,7 @@ function Composer({ disabled }: { disabled: boolean }) {
   return (
     <form
       onSubmit={submit}
-      className="relative flex items-end gap-2 border-t border-slate-200 bg-white px-4 py-3 dark:border-slate-800 dark:bg-slate-900"
+      className="zim-composer relative flex items-end gap-2 border-t border-slate-200 bg-white px-3 pt-3 dark:border-slate-800 dark:bg-slate-900 md:px-4"
     >
       {emojiOpen ? <EmojiPicker onPick={insertEmoji} onClose={() => setEmojiOpen(false)} /> : null}
 
@@ -739,7 +751,7 @@ function Composer({ disabled }: { disabled: boolean }) {
           aria-label="录制语音"
           aria-pressed={Boolean(recording)}
           title={recording ? '结束并发送语音' : '录制语音消息'}
-          className={`grid h-9 w-9 place-items-center rounded-xl text-lg transition disabled:opacity-40 ${
+          className={`hidden h-9 w-9 place-items-center rounded-xl text-lg transition disabled:opacity-40 sm:grid ${
             recording
               ? 'bg-rose-100 text-rose-600 dark:bg-rose-950 dark:text-rose-300'
               : 'hover:bg-slate-100 dark:hover:bg-slate-800'
@@ -814,7 +826,7 @@ function Composer({ disabled }: { disabled: boolean }) {
         value={value}
         rows={1}
         maxLength={4000}
-        placeholder="输入消息，Enter 发送，Shift+Enter 换行，可直接粘贴图片"
+        placeholder={compact ? '输入消息…' : '输入消息，Enter 发送，Shift+Enter 换行，可直接粘贴图片'}
         onChange={(event) => {
           setValue(event.target.value);
           imStore.setDraft(state.activeCid ?? '', event.target.value);
@@ -835,7 +847,7 @@ function Composer({ disabled }: { disabled: boolean }) {
       <button
         type="submit"
         disabled={disabled}
-        className="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50"
+        className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-500 disabled:opacity-50 sm:px-5"
       >
         发送
       </button>
@@ -1226,7 +1238,7 @@ export function ChatPanel() {
             setAtBottom(near);
           }
         }}
-        className="relative flex flex-1 flex-col overflow-y-auto px-4 py-4"
+        className="relative flex flex-1 flex-col overflow-y-auto px-3 py-4 sm:px-4"
       >
         {groupNotice ? (
           <div
@@ -1479,7 +1491,7 @@ export function ChatPanel() {
 
       {contextMenu ? (
         <>
-          <div className="fixed inset-0 z-[55]" onClick={() => setContextMenu(null)} onContextMenu={(event) => {
+          <div className="fixed inset-0 z-[55]" data-message-menu-overlay onClick={() => setContextMenu(null)} onContextMenu={(event) => {
             event.preventDefault();
             setContextMenu(null);
           }} />

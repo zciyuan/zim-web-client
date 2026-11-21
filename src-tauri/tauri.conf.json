@@ -12,12 +12,18 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "ZIM",
-        "width": 1200,
-        "height": 800,
-        "minWidth": 900,
+        "width": 1280,
+        "height": 860,
+        "minWidth": 940,
         "minHeight": 640,
-        "resizable": true
+        "center": true,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true,
+        "decorations": true,
+        "dragDropEnabled": true
       }
     ],
     "security": {
@@ -26,7 +32,26 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"]
+    "targets": ["msi", "nsis"],
+    "publisher": "ZIM",
+    "copyright": "ZIM",
+    "category": "SocialNetworking",
+    "shortDescription": "ZIM 即时通讯桌面端",
+    "longDescription": "ZIM 即时通讯桌面客户端，与 Web / App 共享同一套 React 代码。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"]
+      }
+    }
   }
 }

@@ -6,7 +6,7 @@ export function Toast() {
   return (
     <div
       role="status"
-      className={`fixed bottom-7 left-1/2 z-50 max-w-[90vw] -translate-x-1/2 rounded-full px-4 py-2 text-sm shadow-lg ${
+      className={`fixed bottom-[calc(1.75rem+var(--safe-bottom))] left-1/2 z-50 max-w-[90vw] -translate-x-1/2 rounded-full px-4 py-2 text-sm shadow-lg ${
         toast.kind === 'error' ? 'bg-rose-600 text-white' : 'bg-slate-900 text-slate-50'
       }`}
     >

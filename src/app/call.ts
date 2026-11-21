@@ -27,6 +27,8 @@ export class CallSession {
   private speakers: string[] = [];
   private localVideoEl: HTMLVideoElement | null = null;
   private mediaErrors: string[] = [];
+  /** Microphone the pre-call probe opened ('' = let LiveKit use the default). */
+  private audioDeviceId = '';
 
   /**
    * Registers (or updates) handlers. Media already flowing is replayed, because
@@ -46,8 +48,11 @@ export class CallSession {
   }
 
   /** Joins the SFU room and publishes mic (and camera for video calls). */
-  async connect(url: string, token: string, video: boolean): Promise<void> {
+  async connect(url: string, token: string, video: boolean, audioDeviceId = ''): Promise<void> {
     await this.end();
+    // Remembered for every later capture (publish, unmute, reconnect): a stale
+    // browser default would otherwise reopen a device that no longer exists.
+    this.audioDeviceId = audioDeviceId;
     // 360p capture keeps phones (and software-rendered desktops) responsive; the
     // SFU still forwards whatever the sender publishes.
     const room = new Room({
@@ -133,7 +138,7 @@ export class CallSession {
       if (import.meta.env.DEV) console.debug('[zim] publish attempt', attempt, 'video=' + video);
       try {
         if (!room.localParticipant.isMicrophoneEnabled) {
-          await room.localParticipant.setMicrophoneEnabled(true);
+          await room.localParticipant.setMicrophoneEnabled(true, this.audioCapture());
         }
         if (video && !room.localParticipant.isCameraEnabled) {
           await room.localParticipant.setCameraEnabled(true);
@@ -148,6 +153,11 @@ export class CallSession {
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
     }
+  }
+
+  /** Capture options that pin the probe-selected microphone ('' = default). */
+  private audioCapture(): { deviceId: string } | undefined {
+    return this.audioDeviceId ? { deviceId: this.audioDeviceId } : undefined;
   }
 
   private emitTracks(): void {
@@ -186,7 +196,7 @@ export class CallSession {
   }
 
   async setMicrophone(enabled: boolean): Promise<void> {
-    await this.room?.localParticipant.setMicrophoneEnabled(enabled);
+    await this.room?.localParticipant.setMicrophoneEnabled(enabled, this.audioCapture());
   }
 
   async setCamera(enabled: boolean): Promise<void> {
@@ -225,6 +235,7 @@ export class CallSession {
     this.mediaErrors = [];
     this.localVideoEl = null;
     this.speakers = [];
+    this.audioDeviceId = '';
     this.emitTracks();
     if (!this.room) return;
     const room = this.room;

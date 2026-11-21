@@ -6,13 +6,14 @@
 import { useSyncExternalStore } from 'react';
 
 import { IMClient, type ConnectionState, type PushEvent } from '../sdk/client';
-import { decideTransport, parseTransports, probeWebTransport, recordDecision, webTransportGatewayUrl, type TransportDecision } from '../sdk/transport';
+import { decideTransport, parseTransports, recordDecision, webTransportGatewayUrl, webTransportSupported, type TransportDecision } from '../sdk/transport';
 import { ImError, wrapError } from '../sdk/errors';
 import { directConversationId, groupConversationId, loadOlder, loadTail } from '../sdk/history';
 import { messagePreview, messageText } from './format';
 import { offerPasswordSave, saveLoginPrefs } from './loginPrefs';
 import { captureVideoPoster, compressImage, measureImage, measureMedia } from './image';
 import { randomId } from './id';
+import { acquireMediaAccess, describeAudioInputFailure } from './media-devices';
 import { detectRtcSupport, explainRtcError } from './rtc-support';
 import {
   OP,
@@ -67,6 +68,17 @@ import {
 } from '../sdk/rtc';
 import { GROUP_EVENT, decodeGroupEvent, type GroupEvent } from '../sdk/groups';
 import { callSession } from './call';
+import {
+  applySystemChrome,
+  nativeQuicBridge,
+  notificationPermission,
+  platform,
+  platformFetch,
+  requestNotificationPermission,
+  saveTextFile,
+  showNotification,
+} from '../platform';
+
 import {
   decodeRelationOperationRes,
   encodeAddBlackReq,
@@ -285,13 +297,52 @@ const normalizeHttpBase = (raw: string): string => {
   return /^https?:\/\//i.test(value) ? value : `http://${value}`;
 };
 
+/**
+ * Builds a REST client for one endpoint. Native shells (PC/App) must send
+ * requests through the native bridge; plain Web/PWA stays on window.fetch.
+ */
+const createHttp = (baseUrl: string): IMHttp => new IMHttp({
+  baseUrl,
+  fetchImpl: platformFetch,
+  xhrUpload: platform.capabilities.xhrUploadProgress,
+});
+
 const wsBaseOf = (httpBase: string): string => (httpBase ? httpBase.replace(/^http/i, 'ws') : '');
 
-// The SFU URL comes from the server. In dev it is a loopback address, which a
-// phone on the LAN cannot reach, and an https page cannot open ws:// at all.
-// Rewrite it to the page origin (/rtc is proxied by the dev server) so calls
-// work from any device on the network with the certificate the page already has.
-const sfuUrlFor = (raw: string): string => {
+const hostOfAddr = (addr: string): string => {
+  if (addr.startsWith('[')) return addr.slice(1, addr.indexOf(']'));
+  return addr.split(':')[0] ?? addr;
+};
+
+const friendRequestKey = (item: FriendRequestItem): string =>
+  String(item.id ?? `${item.from_id}:${item.to_id}:${item.created_at ?? ''}`);
+
+/**
+ * Inbound requests the UI may act on: backend status 0 (pending) only.
+ * Handled rows (accepted/rejected/expired) and duplicate requests from the same
+ * sender are dropped so a stale refresh can never leave a dead accept button.
+ */
+const normalizeFriendRequests = (items: FriendRequestItem[]): FriendRequestItem[] => {
+  const bySender = new Map<string, FriendRequestItem>();
+  for (const item of items) {
+    if (item.status !== undefined && item.status !== null && Number(item.status) !== 0) continue;
+    const from = String(item.from_id ?? '');
+    if (!from || bySender.has(from)) continue;
+    bySender.set(from, item);
+  }
+  return [...bySender.values()];
+};
+
+/**
+ * The SFU URL comes from the server. In dev it is a loopback address, which a
+ * phone on the LAN cannot reach, and an https page cannot open ws:// at all.
+ * Rewrite it to the page origin (/rtc is proxied by the dev server) so calls
+ * work from any device on the network with the certificate the page already has.
+ *
+ * Native shells have no useful page origin: the PC keeps loopback URLs as-is
+ * (same machine), and the app points them at the configured API host.
+ */
+const sfuUrlFor = (raw: string, endpoint: string): string => {
   if (typeof window === 'undefined') return raw;
   let url: URL;
   try {
@@ -300,13 +351,27 @@ const sfuUrlFor = (raw: string): string => {
     return raw;
   }
   const loopback = url.hostname === '127.0.0.1' || url.hostname === 'localhost' || url.hostname === '::1';
+
+  if (platform.native) {
+    if (platform.desktop) return raw;
+    try {
+      const api = new URL(endpoint);
+      if (!/^(127\.0\.0\.1|localhost|\[::1\])$/i.test(api.hostname)) {
+        const secure = api.protocol === 'https:';
+        return `${secure ? 'wss' : 'ws'}://${api.hostname}:${url.port || (secure ? '443' : '80')}`;
+      }
+    } catch {
+      // No usable endpoint: fall through to the web rewrite.
+    }
+    return raw;
+  }
+
   const insecureOnHttps = window.location.protocol === 'https:' && url.protocol === 'ws:';
   if (!loopback && !insecureOnHttps) return raw;
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   // The LiveKit SDK appends /rtc itself, so the base must stay at the origin.
   return `${scheme}//${window.location.host}`;
 };
-
 const deviceId = (): string => {
   let id = localStorage.getItem(DEVICE_KEY);
   if (!id) {
@@ -415,7 +480,7 @@ const emptyThread = (): Thread => ({
 class ImStore {
   private state: ImState = initialState;
   private listeners = new Set<() => void>();
-  private rest = new IMHttp({ baseUrl: initialState.endpoint });
+  private rest = createHttp(initialState.endpoint);
   private client: IMClient | null = null;
   private seenPushes = new Set<string>();
   private pollTimer: number | null = null;
@@ -444,10 +509,14 @@ class ImStore {
   private ringTimer: number | null = null;
   /** Join-the-SFU timeout for the current call. */
   private connectTimer: number | null = null;
+  /** Microphone Chrome actually opened for the current call ('' = browser default). */
+  private audioInputId = '';
   /** Pushes that arrived while a thread page was still loading, keyed by cid. */
   private pendingPushes = new Map<string, UiMessage[]>();
   /** Files kept for failed uploads so they can be retried. */
   private uploadJobs = new Map<string, { file: File; msgType: number; guard: number | null }>();
+  /** uid -> time the local user answered its request; hides stale refreshes. */
+  private handledRequests = new Map<string, number>();
 
   constructor() {
     this.applyTheme();
@@ -469,6 +538,7 @@ class ImStore {
       || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
     document.documentElement.classList.toggle('dark', dark);
     document.documentElement.dataset.theme = mode;
+    applySystemChrome(dark ? 'dark' : 'light');
   }
 
   /** Sets and persists the theme ('system' | 'light' | 'dark'). */
@@ -634,11 +704,20 @@ class ImStore {
     }
   }
 
+  /** Native shells load the bundle from a local origin: the API needs a URL. */
+  private requireEndpoint(endpoint: string): void {
+    if (!platform.native || endpoint) return;
+    const error = new ImError(0, '请填写服务器地址，例如 https://im.example.com');
+    this.set({ status: 'idle', authError: error.display, connection: 'closed' });
+    throw error;
+  }
+
   async login(username: string, password: string, rawEndpoint: string): Promise<void> {
     const endpoint = normalizeHttpBase(rawEndpoint);
+    this.requireEndpoint(endpoint);
     localStorage.setItem(ENDPOINT_KEY, endpoint);
     this.set({ status: 'authenticating', authError: '', endpoint });
-    this.rest = new IMHttp({ baseUrl: endpoint });
+    this.rest = createHttp(endpoint);
 
     try {
       const session = await this.rest.login({ username, password, platform: 4 });
@@ -661,9 +740,10 @@ class ImStore {
   /** Creates an account and enters the app in one round trip. */
   async register(username: string, password: string, nickname: string, rawEndpoint: string): Promise<void> {
     const endpoint = normalizeHttpBase(rawEndpoint);
+    this.requireEndpoint(endpoint);
     localStorage.setItem(ENDPOINT_KEY, endpoint);
     this.set({ status: 'authenticating', authError: '', endpoint });
-    this.rest = new IMHttp({ baseUrl: endpoint });
+    this.rest = createHttp(endpoint);
 
     try {
       const session = await this.rest.register({ username, password, nickname, platform: 4 });
@@ -711,7 +791,7 @@ class ImStore {
     }
 
     this.set({ status: 'restoring', endpoint: saved.endpoint ?? '' });
-    this.rest = new IMHttp({ baseUrl: saved.endpoint ?? '' });
+    this.rest = createHttp(saved.endpoint ?? '');
     this.rest.setTokens({ accessToken: saved.accessToken, refreshToken: saved.refreshToken });
     try {
       await this.enterWorkspaceWithRetry(saved.accessToken, saved.endpoint ?? '', saved.username ?? '');
@@ -754,45 +834,68 @@ class ImStore {
   }
 
   /**
-   * Reads `transports` from the client config and records which transport this
-   * browser may use. The web client always ends up on WS today: the gate's QUIC
-   * listener speaks a custom protocol (browser-inaccessible ALPN, not HTTP/3),
-   * and a WebTransport gateway does not exist yet. When one lands, the WebTransport
-   * transport can be plugged in behind this decision without touching the app.
+   * Negotiates the transport from GET /v1/ws/ticket (preferred) or the legacy
+   * client-config `transports` key. Returns the one-shot ticket so the first
+   * WebTransport dial reuses it instead of spending another request.
    */
-  private async loadTransportConfig(): Promise<void> {
+  private async loadTransportConfig(): Promise<{ decision: TransportDecision; ticket: string }> {
     let options: ReturnType<typeof parseTransports> = [];
+    let ticket = '';
     try {
-      const items = await this.rest?.clientConfig();
-      const raw = items?.['transports'] ?? items?.['client.transports'];
-      options = parseTransports(raw);
+      if (webTransportSupported() || platform.capabilities.nativeQuic) {
+        const info = await this.rest.wsTicket(4);
+        ticket = info.ticket ?? '';
+        options = parseTransports(info.transports ?? []);
+      } else {
+        const items = await this.rest.clientConfig();
+        const raw = items?.['transports'] ?? items?.['client.transports'];
+        options = parseTransports(raw);
+      }
     } catch (err) {
-      if (import.meta.env.DEV) console.debug('[zim] transport config unavailable', String(err));
+      if (import.meta.env.DEV) console.debug('[zim] ws ticket unavailable, using client config', String(err));
+      try {
+        const items = await this.rest.clientConfig();
+        const raw = items?.['transports'] ?? items?.['client.transports'];
+        options = parseTransports(raw);
+      } catch {
+        options = [];
+      }
     }
     const seed = `${deviceId()}|${this.state.me?.uid ?? ''}`;
-    const decision = recordDecision(decideTransport(options, seed));
+    const decision = recordDecision(decideTransport(options, seed, {
+      nativeQuic: platform.capabilities.nativeQuic && Boolean(nativeQuicBridge?.available),
+    }));
     this.set({ transport: decision });
     if (import.meta.env.DEV) {
       console.debug(`[zim] transport ${decision.kind} (${decision.reason}) bucket=${decision.bucket}`);
     }
-    if (decision.kind === 'webtransport' && decision.option) {
-      // Only reached once a WebTransport gateway is advertised: the 200ms probe
-      // is the contract's fallback trigger.
-      const url = webTransportGatewayUrl(decision.option);
-      void probeWebTransport(url, 200).then((result) => {
-        if (import.meta.env.DEV) console.debug(`[zim] webtransport probe ok=${result.ok} ${result.ms}ms`);
-      });
-    }
+    return { decision, ticket };
   }
 
   private async enterWorkspace(token: string, endpoint: string, username: string): Promise<void> {
     // Same-platform logins are single-session: the newest connection wins and the
     // server pushes 1902 to the old one, which then logs out (see handleKick).
     this.set({ kickedLoop: false });
-    // Negotiate the transport before dialing. The browser can only speak WS
-    // today (raw QUIC is native-only; WebTransport needs a gateway the gate does
-    // not expose yet), but the decision + rollout metrics are recorded here.
-    await this.loadTransportConfig();
+    // Negotiate first: /v1/ws/ticket publishes ws / quic / webtransport. A
+    // browser can only use ws or WebTransport; the client falls back if the
+    // QUIC-family handshake does not finish inside the 200ms window.
+    const negotiated = await this.loadTransportConfig();
+    let ticket = negotiated.ticket;
+    const webTransportUrl = negotiated.decision.option?.type === 'webtransport'
+      ? webTransportGatewayUrl(negotiated.decision.option)
+      : '';
+    const quicOption = negotiated.decision.option?.type === 'quic'
+      ? negotiated.decision.option
+      : undefined;
+    const quicTarget = quicOption?.addr
+      ? {
+        addr: quicOption.addr,
+        serverName: hostOfAddr(quicOption.addr),
+        alpn: quicOption.alpn ?? 'due-quic',
+        caFile: (import.meta.env.VITE_ZIM_QUIC_CA_FILE as string | undefined) ?? '',
+        allowInsecure: import.meta.env.VITE_ZIM_QUIC_INSECURE === '1',
+      }
+      : undefined;
     // One live socket per client: a re-login must not leave the previous one
     // reconnecting in the background (it would kick the new connection).
     this.client?.close();
@@ -800,7 +903,26 @@ class ImStore {
       baseUrl: wsBaseOf(endpoint),
       sdk: SDK_VERSION,
       deviceId: deviceId(),
-      deviceName: '浏览器',
+      deviceName: platform.desktop ? '桌面端' : platform.mobile ? '手机' : '浏览器',
+      transport: negotiated.decision.kind,
+      nativeQuic: platform.capabilities.nativeQuic ? nativeQuicBridge ?? undefined : undefined,
+      quic: quicTarget,
+      webTransportUrl: webTransportUrl || undefined,
+      webTransportTicketProvider: async () => {
+        // Reuse the ticket fetched during negotiation exactly once; every later
+        // dial (reconnect included) needs a fresh one-shot ticket.
+        if (ticket) {
+          const value = ticket;
+          ticket = '';
+          return value;
+        }
+        return (await this.rest.wsTicket(4)).ticket;
+      },
+      onTransport: (kind, reason) => {
+        const current = this.state.transport;
+        if (!current || current.kind === kind) return;
+        this.set({ transport: { ...current, kind, reason } });
+      },
       onState: (connection, detail) => {
         if (import.meta.env.DEV) console.debug(`[zim] conn ${connection} ${detail?.code ?? ''} ${detail?.reason ?? ''}`);
         this.set({ connection: connection === 'reconnected' ? 'open' : connection });
@@ -897,6 +1019,15 @@ class ImStore {
 
   // ------------------------------------------------------------- bootstrap --
 
+  /** Pending inbox rows, minus requests this client already answered. */
+  private pendingFriendRequests(items: FriendRequestItem[]): FriendRequestItem[] {
+    const now = Date.now();
+    for (const [uid, at] of this.handledRequests) {
+      if (now - at > 30_000) this.handledRequests.delete(uid);
+    }
+    return normalizeFriendRequests(items).filter((item) => !this.handledRequests.has(String(item.from_id)));
+  }
+
   private async bootstrap(): Promise<void> {
     const results = await Promise.allSettled([
       this.rest.me(),
@@ -923,7 +1054,7 @@ class ImStore {
       patch.conversations = conversations.value.map((item) => normalizeConversation(item, selfUid));
     }
     if (groups.status === 'fulfilled') patch.groups = groups.value;
-    if (requests.status === 'fulfilled') patch.friendRequests = requests.value as FriendRequestItem[];
+    if (requests.status === 'fulfilled') patch.friendRequests = this.pendingFriendRequests(requests.value as FriendRequestItem[]);
     if (blacklist.status === 'fulfilled') patch.blacklist = blacklist.value as UserProfile[];
     this.set(patch);
 
@@ -1121,11 +1252,12 @@ class ImStore {
         this.rest.friends(),
       ]);
       const before = this.state.friendRequests.length;
+      const pending = this.pendingFriendRequests(requests as FriendRequestItem[]);
       this.set({
-        friendRequests: requests as FriendRequestItem[],
+        friendRequests: pending,
         friends: friends as Friend[],
       });
-      if (requests.length > before) this.notify('收到新的好友申请');
+      if (pending.length > before) this.notify('收到新的好友申请');
     } catch {
       // offline or transient: the next tick retries
     }
@@ -1189,7 +1321,7 @@ class ImStore {
     ]);
     const patch: Partial<ImState> = {};
     if (friends.status === 'fulfilled') patch.friends = friends.value;
-    if (requests.status === 'fulfilled') patch.friendRequests = requests.value as FriendRequestItem[];
+    if (requests.status === 'fulfilled') patch.friendRequests = this.pendingFriendRequests(requests.value as FriendRequestItem[]);
     if (blacklist.status === 'fulfilled') patch.blacklist = blacklist.value as UserProfile[];
     this.set(patch);
 
@@ -1226,13 +1358,53 @@ class ImStore {
   }
 
   async answerFriend(uid: string, accept: boolean): Promise<void> {
+    const target = String(uid);
+    // Remove the inbox row immediately: a slow/failed refresh must never leave
+    // an accept/reject button that the server already considers handled.
+    this.handledRequests.set(target, Date.now());
+    const previousRequests = this.state.friendRequests;
+    const removed = previousRequests.filter((item) => String(item.from_id) === target);
+    const alreadyFriend = this.state.friends.some((item) => String(item.friend_id) === target);
+    const profile = this.state.requestProfiles[target];
+    const optimisticFriend: Friend = {
+      friend_id: target,
+      remark: '',
+      pinned: 0,
+      created_at: Date.now(),
+      ...(profile ? { profile } : {}),
+    };
+    this.set({
+      friendRequests: previousRequests.filter((item) => String(item.from_id) !== target),
+      ...(accept && !alreadyFriend ? { friends: [optimisticFriend, ...this.state.friends] } : {}),
+    });
+
     try {
-      if (!(await this.friendViaWs(OP.ANSWER_FRIEND, encodeAnswerFriendReq({ friendId: uid, accept })))) {
-        await this.rest.answerFriend(uid, accept);
+      if (!(await this.friendViaWs(OP.ANSWER_FRIEND, encodeAnswerFriendReq({ friendId: target, accept })))) {
+        await this.rest.answerFriend(target, accept);
       }
       await this.refreshRelations();
       this.notify(accept ? '已添加好友' : '已拒绝');
     } catch (err) {
+      const code = wrapError(err).code;
+      if (code === 120002) {
+        // Already handled by another client/tab: keep the row removed and let
+        // the server state decide whether the friend really exists.
+        if (accept && !alreadyFriend) {
+          this.set({ friends: this.state.friends.filter((item) => String(item.friend_id) !== target) });
+        }
+        this.notify('该好友申请已处理');
+        await this.refreshRelations();
+        return;
+      }
+      const missing = removed.filter((item) => !this.state.friendRequests
+        .some((current) => friendRequestKey(current) === friendRequestKey(item)));
+      this.handledRequests.delete(target);
+      this.set({
+        friendRequests: [...this.state.friendRequests, ...missing],
+        ...(accept && !alreadyFriend
+          ? { friends: this.state.friends.filter((item) => String(item.friend_id) !== target) }
+          : {}),
+      });
       this.notify(`处理申请失败：${wrapError(err).display}`, 'error');
       throw err;
     }
@@ -1678,8 +1850,8 @@ class ImStore {
     return { conversations, messages };
   }
 
-  /** Exports the loaded thread as a plain-text transcript download. */
-  exportConversation(cid: string): void {
+  /** Exports the loaded thread as a plain-text transcript (shell-aware save). */
+  async exportConversation(cid: string): Promise<void> {
     const conversation = this.conversation(cid);
     const thread = this.state.threads[cid];
     if (!conversation || !thread || thread.items.length === 0) {
@@ -1688,22 +1860,19 @@ class ImStore {
     }
     const lines = thread.items.map((item) => {
       const at = new Date(Number(item.send_time)).toLocaleString();
-      const who = String(item.send_id) === String(this.state.me?.uid ?? '')
-        ? this.senderName(item.send_id)
-        : this.senderName(item.send_id);
       const body = messagePreview(item.content, item.msg_type);
-      return `[${at}] ${who}: ${body}`;
+      return `[${at}] ${this.senderName(item.send_id)}: ${body}`;
     });
     const header = `# ${this.conversationTitle(conversation)} (${cid})\n`;
-    const blob = new Blob([header + lines.join('\n')], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `zim-${cid}-${Date.now()}.txt`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
+    const outcome = await saveTextFile(`zim-${cid}-${Date.now()}.txt`, header + lines.join('\n'));
+    if (outcome === 'cancelled') {
+      this.notify('已取消导出');
+      return;
+    }
+    if (outcome === 'failed') {
+      this.notify('导出失败，请重试', 'error');
+      return;
+    }
     this.notify(`已导出 ${thread.items.length} 条消息`);
   }
 
@@ -2724,6 +2893,8 @@ class ImStore {
     if (event.opcode === OP.PUSH_FRIEND) {
       const update = decodeFriendEventPush(event.payload);
       if (update.kind === 1 && String(update.to_uid) === String(this.state.me?.uid ?? '')) {
+        // A fresh request from a user we just answered must show up again.
+        this.handledRequests.delete(String(update.from_uid));
         this.notify('收到新的好友申请');
       }
       void this.refreshRelations();
@@ -2867,33 +3038,29 @@ class ImStore {
     }
   }
 
-  /** True when the browser granted desktop notifications. */
-  get canNotify(): boolean {
-    return typeof Notification !== 'undefined' && Notification.permission === 'granted';
-  }
-
   /** Asks for notification permission (must be called from a user gesture). */
   async enableNotifications(): Promise<void> {
-    if (typeof Notification === 'undefined') {
-      this.notify('当前浏览器不支持桌面通知', 'error');
+    const current = await notificationPermission();
+    if (current === 'unsupported') {
+      this.notify('当前环境不支持系统通知', 'error');
       return;
     }
-    if (Notification.permission === 'granted') {
-      this.set({ notifications: true });
-      this.persistNotifications(true);
-      this.notify('桌面通知已开启');
+    if (current === 'denied') {
+      this.set({ notifications: false });
+      this.notify('通知权限已被拒绝，请在系统设置中开启', 'error');
       return;
     }
-    const permission = await Notification.requestPermission();
-    this.set({ notifications: permission === 'granted' });
-    this.notify(permission === 'granted' ? '桌面通知已开启' : '桌面通知被拒绝，可在浏览器设置中放开');
+    const granted = current === 'granted' || await requestNotificationPermission();
+    this.set({ notifications: granted });
+    this.persistNotifications(granted);
+    this.notify(granted ? '系统通知已开启' : '通知权限被拒绝，可在系统设置中放开');
   }
 
-  /** Turns desktop notifications off again (permission stays granted). */
+  /** Turns system notifications off again (permission stays granted). */
   disableNotifications(): void {
     this.set({ notifications: false });
     this.persistNotifications(false);
-    this.notify('桌面通知已关闭');
+    this.notify('系统通知已关闭');
   }
 
   private persistNotifications(enabled: boolean): void {
@@ -2905,22 +3072,21 @@ class ImStore {
   }
 
   /** Shows a system notification for a background message. */
-  private showDesktopNotification(cid: string, item: MessageItem): void {
-    if (!this.state.notifications || !this.canNotify) return;
+  private async showDesktopNotification(cid: string, item: MessageItem): Promise<void> {
+    if (!this.state.notifications) return;
     if (document.visibilityState === 'visible') return;
     const conversation = this.conversation(cid);
     const title = conversation?.type === 2 ? this.groupName(String(conversation.group_id)) : this.senderName(item.send_id);
     const body = messagePreview(item.content, item.msg_type);
-    try {
-      const notification = new Notification(title, { body, tag: cid, silent: false });
-      notification.onclick = () => {
+    await showNotification({
+      title,
+      body,
+      tag: cid,
+      onClick: () => {
         window.focus();
         void this.openConversation(cid);
-        notification.close();
-      };
-    } catch {
-      // Notification construction can throw when the page is not focused.
-    }
+      },
+    });
   }
 
   // ------------------------------------------------------------------ call --
@@ -2942,43 +3108,28 @@ class ImStore {
    * invite/answer/join happens, so a denied permission never creates a room or
    * a ringing call. Tracks are stopped right away: LiveKit re-opens them when
    * it publishes. When only the camera is unavailable the call degrades to
-   * voice instead of failing.
+   * voice instead of failing; when the *default* microphone is stale the probe
+   * falls back to an enumerated input and the call publishes that device.
    */
   private async ensureMediaPermissions(video: boolean): Promise<{ ok: boolean; video: boolean }> {
+    this.audioInputId = '';
     if (!navigator.mediaDevices?.getUserMedia) {
       this.notify('当前浏览器不支持麦克风/摄像头', 'error');
       return { ok: false, video: false };
     }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video });
-      stream.getTracks().forEach((track) => track.stop());
-      return { ok: true, video };
-    } catch (err) {
-      if (video) {
-        // Camera missing or blocked: keep the call usable as voice.
-        try {
-          const audio = await navigator.mediaDevices.getUserMedia({ audio: true });
-          audio.getTracks().forEach((track) => track.stop());
-          this.notify('摄像头不可用，已切换为语音通话');
-          return { ok: true, video: false };
-        } catch {
-          // Fall through to the audio failure copy below.
-        }
-      }
-      const name = (err as { name?: string })?.name ?? '';
-      let detail: string;
-      if (name === 'NotAllowedError' || name === 'SecurityError') {
-        detail = `${video ? '麦克风和摄像头' : '麦克风'}权限被拒绝：请在地址栏的站点设置里允许后重试`;
-      } else if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
-        detail = video ? '未检测到可用的麦克风或摄像头' : '未检测到可用的麦克风';
-      } else if (name === 'NotReadableError' || name === 'TrackStartError') {
-        detail = '麦克风/摄像头被其他应用占用，关闭后重试';
-      } else {
-        detail = `无法访问${video ? '麦克风/摄像头' : '麦克风'}，请检查系统权限`;
-      }
-      this.notify(detail, 'error');
+    const access = await acquireMediaAccess(video);
+    if (!access.ok) {
+      this.notify(describeAudioInputFailure(access), 'error');
       return { ok: false, video: false };
     }
+    this.audioInputId = access.deviceId;
+    if (access.cameraFailed) {
+      this.notify('摄像头不可用，已切换为语音通话');
+    } else if (access.recovered) {
+      // The browser default device was gone and this input replaced it.
+      this.notify(`已切换可用的麦克风${access.label ? `：${access.label}` : ''}`);
+    }
+    return { ok: true, video: access.video };
   }
 
   /**
@@ -2987,7 +3138,11 @@ class ImStore {
    * - 180009 (expired/invalid token) refetches a token through 1806.
    */
   private async connectMedia(callId: string, video: boolean, token: string, sfuUrl: string): Promise<void> {
-    const attempt = (nextToken: string, nextUrl: string) => callSession.connect(sfuUrlFor(nextUrl), nextToken, video);
+    // Publish the microphone the pre-call probe actually opened: after a USB
+    // headset re-plug the browser default stays stale and LiveKit would fail to
+    // capture even though the probe succeeded on an explicit device.
+    const attempt = (nextToken: string, nextUrl: string) =>
+      callSession.connect(sfuUrlFor(nextUrl, this.state.endpoint), nextToken, video, this.audioInputId);
     try {
       await attempt(token, sfuUrl);
     } catch (err) {

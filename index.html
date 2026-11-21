@@ -2,16 +2,90 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <title>ZIM IM</title>
     <meta name="description" content="ZIM 即时通讯客户端：Web / PC / App 同一套代码" />
-    <meta name="theme-color" content="#5b6cff" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f8fafc" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="ZIM" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="format-detection" content="telephone=no" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
+    <style>
+      /* Boot styles are inline so the first paint never flashes white. */
+      html, body, #root { height: 100%; }
+      body { margin: 0; background: #f8fafc; }
+      html.dark body { background: #0f172a; }
+      .zim-boot {
+        height: 100%;
+        display: grid;
+        place-content: center;
+        justify-items: center;
+        gap: 14px;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+      }
+      .zim-boot__logo {
+        width: 56px;
+        height: 56px;
+        border-radius: 16px;
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        background: linear-gradient(135deg, #6366f1, #8b5cf6);
+        box-shadow: 0 12px 30px rgb(99 102 241 / 28%);
+      }
+      .zim-boot__text { color: #64748b; font-size: 12px; }
+      html.dark .zim-boot__text { color: #94a3b8; }
+      .zim-boot__bar {
+        width: 96px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgb(148 163 184 / 30%);
+      }
+      .zim-boot__bar::after {
+        content: "";
+        display: block;
+        width: 40%;
+        height: 100%;
+        border-radius: inherit;
+        background: #6366f1;
+        animation: zim-boot-slide 1s ease-in-out infinite;
+      }
+      @keyframes zim-boot-slide {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(250%); }
+      }
+    </style>
+    <script>
+      // Apply the saved theme before the stylesheet paints.
+      (function () {
+        try {
+          var mode = localStorage.getItem('zim.theme');
+          var dark = mode === 'dark'
+            || ((!mode || mode === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.classList.toggle('dark', dark);
+          document.documentElement.dataset.theme = mode || 'system';
+        } catch (error) { /* private mode */ }
+      })();
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="zim-boot" aria-label="正在启动 ZIM">
+        <div class="zim-boot__logo">ZIM</div>
+        <div class="zim-boot__bar" aria-hidden="true"></div>
+        <div class="zim-boot__text">正在启动…</div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

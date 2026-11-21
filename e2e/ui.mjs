@@ -230,7 +230,15 @@ const main = async () => {
   step(`bob sends: ${text}`);
   await bob.focus('[aria-label="消息输入"]');
   await bob.keyboard.type(text);
-  await bob.keyboard.press('Enter');
+  // Headless Chrome freezes background WebSockets: keep the receiver in front
+  // while the message is published, otherwise 1901 is lost to the harness.
+  await alice.bringToFront();
+  await bob.evaluate(() => {
+    const button = [...document.querySelectorAll('[aria-label="聊天"] button')]
+      .find((item) => item.textContent === '发送');
+    if (!button) throw new Error('send button missing');
+    button.click();
+  });
   await bob.waitForFunction(
     (needle) => document.querySelector('[aria-label="聊天"]')?.textContent?.includes(needle),
     { timeout: 15_000 },
@@ -644,7 +652,8 @@ const main = async () => {
   });  assert.equal(await waitCallPhase(alice, ['outgoing']), 'outgoing', 'caller should be in outgoing');
   assert.equal(await waitCallPhase(bob, ['incoming']), 'incoming', 'callee should ring');
 
-  await bob.bringToFront();
+  // Keep the caller foreground while the callee accepts: headless Chrome freezes
+  // a background WebSocket, which would drop the 1802 answer push.
   await bob.evaluate(() => {
     const button = [...document.querySelectorAll('[aria-label="通话"] button')]
       .find((item) => item.textContent === '接听');
@@ -927,6 +936,9 @@ const main = async () => {
   await alice.bringToFront();
   await jsClick(alice, '[aria-label="主导航"] button:nth-child(1)');
   await openRowByLabel(alice, 'Bob', 'Bob', '[aria-label="聊天"] header');
+  // The 1906 push dies in a frozen background WebSocket; put the receiver back
+  // in front before waiting for the read marker.
+  await bob.bringToFront();
   await bob.waitForFunction(
     () => document.querySelector('[data-read-status]')?.getAttribute('data-read-status') === 'read',
     { timeout: 20_000 },

@@ -26,6 +26,8 @@ export interface RestOptions {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  /** Use XHR for upload progress (plain browser). Native bridges use fetch. */
+  xhrUpload?: boolean;
 }
 
 export class IMHttp {
@@ -35,11 +37,13 @@ export class IMHttp {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly xhrUpload: boolean;
 
   constructor(options: RestOptions = {}) {
     this.baseUrl = (options.baseUrl ?? '').replace(/\/$/, '');
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.timeoutMs = options.timeoutMs ?? 15_000;
+    this.xhrUpload = options.xhrUpload ?? true;
   }
 
   get token(): string {
@@ -164,6 +168,20 @@ export class IMHttp {
     return map;
   }
 
+  /**
+   * GET /v1/ws/ticket — short-lived one-shot connection ticket plus the
+   * transports the gate advertises (ws / quic / webtransport). The ticket is
+   * consumed by the first gate handshake, so callers must fetch a fresh one per
+   * dial (WebTransport reconnect included).
+   */
+  async wsTicket(platform = 4): Promise<{
+    ticket: string;
+    expires_in?: number;
+    transports?: unknown[];
+  }> {
+    return this.send('GET', '/v1/ws/ticket', { params: { platform } });
+  }
+
   // --------------------------------------------------------------- uploads --
 
   /** Resolves a server-relative path against the configured base. */
@@ -205,7 +223,7 @@ export class IMHttp {
     // Authorization header would invalidate it, so only send it for our API.
     const presigned = /[?&]X-Amz-Signature=/i.test(uploadUrl);
     const token = presigned ? '' : this.accessToken;
-    if (file.onProgress && typeof XMLHttpRequest !== 'undefined') {
+    if (file.onProgress && this.xhrUpload && typeof XMLHttpRequest !== 'undefined') {
       await uploadWithProgress(uploadUrl, method, file.blob, file.mime, token, file.onProgress);
     } else {
       const headers: Record<string, string> = { 'Content-Type': file.mime };

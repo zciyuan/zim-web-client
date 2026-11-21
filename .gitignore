@@ -19,8 +19,18 @@ Thumbs.db
 # Tauri / Capacitor native build output
 src-tauri/target/
 src-tauri/gen/
-android/
-ios/
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+ios/App/build/
+ios/App/Pods/
+ios/App/output/
+DerivedData/
+*.apk
+*.aab
+*.msi
 
 # Local TLS certificate for LAN/HTTPS dev
 certs/

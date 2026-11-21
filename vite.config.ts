@@ -3,6 +3,8 @@ import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
+const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { version: string };
+
 // The dev server proxies /v1 and /ws so the browser stays on one origin and the
 // service needs no CORS exception. Override the targets with ZIM_API / ZIM_WS.
 export default defineConfig(({ mode }) => {
@@ -18,6 +20,9 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
+    define: {
+      __APP_VERSION__: JSON.stringify(pkg.version),
+    },
     server: {
       // Bind every interface (IPv4 + IPv6) so phones/other machines on the LAN
       // can open the app. Override with ZIM_HOST (e.g. 127.0.0.1 for local only).
@@ -28,6 +33,18 @@ export default defineConfig(({ mode }) => {
       // host, so the dev server uses 5280. Override with `vite --port`.
       port: 5280,
       strictPort: true,
+      // Native build outputs contain generated HTML/JS; watching them makes the
+      // dev server reload while Tauri/Gradle builds run and breaks live tests.
+      watch: {
+        ignored: [
+          '**/src-tauri/target/**',
+          '**/src-tauri/gen/**',
+          '**/android/**',
+          '**/ios/**',
+          '**/dist/**',
+          '**/_output/**',
+        ],
+      },
       ...(https ? { https } : {}),
       proxy: {
         '/v1': { target: api, changeOrigin: true },

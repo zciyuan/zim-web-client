@@ -1,140 +1,140 @@
-# ZIM Web（React 三端前端）
+# ZIM 三端客户端（React + TypeScript）
 
-**一套 React + TypeScript 代码，覆盖 Web / PC / App。** 协议层（WebSocket 帧 + protobuf + REST）在 `src/sdk/`，与 UI 无关；页面在 `src/components/`。
+**一套 React + TypeScript 代码，交付 Web / PC / App。** 协议层（WebSocket / WebTransport 帧 + protobuf + REST）在 `src/sdk/`，业务状态在 `src/app/`，界面在 `src/components/`；三端差异全部收敛在 `src/platform/` 和三个壳目录里。
 
 > 技术决策：`ZIM` 仓库 `docs/adr/0029-frontend-react-multiplatform.md`。
 > 接口契约：`ZIM` 仓库 `docs/ZIM-02-业务与接口规范.md` §2（WS）、§3（REST）。
 > 本仓库是**独立前端工程**，不进 `ZIM` 后端仓。
+> 三端同步开发约定见 [AGENTS.md](AGENTS.md)，能力矩阵见 [docs/platform-matrix.md](docs/platform-matrix.md)，QUIC/WebTransport 接入见 [docs/quic-webtransport.md](docs/quic-webtransport.md)，PC/Android 原生裸 QUIC 见 [docs/native-quic.md](docs/native-quic.md)。
 
-## 交付形态（重要）
+## 交付形态
 
 | 端 | 形态 | 状态 |
 |---|---|---|
-| Web | `dist/` 静态托管 + 反向代理 `/v1`、`/ws`、`/rtc` | ✅ 已实现并持续联调（本地 + 线上 `https://120.55.6.180:12004`） |
-| App（PWA） | `manifest.webmanifest` + `sw.js`，浏览器安装到主屏 | ✅ 已内置，随 Web 一起发布 |
-| PC（Tauri 2） | `src-tauri/` 复用同一份 `dist/` | 🟡 **脚手架**：已配置 `devUrl`/`frontendDist`，但需要 Rust 工具链 + `@tauri-apps/cli` 才能真正构建，尚未产出安装包 |
-| App（Capacitor） | `capacitor.config.ts` 指向 `dist/` | 🟡 **脚手架**：需要安装 Capacitor 包并 `cap add android/ios`，尚未生成原生工程 |
+| Web | `dist/` 静态托管 + 反向代理 `/v1`、`/ws`、`/rtc` | ✅ 已实现并持续联调 |
+| PWA | `manifest.webmanifest` + `sw.js`，随 Web 发布 | ✅ 已内置，可安装到桌面/主屏 |
+| PC | Tauri 2（`src-tauri/`），复用同一份 `dist/` | ✅ 可构建 `.msi` / `.exe`，托盘/窗口状态/原生通知/原生 HTTP/保存对话框已接 |
+| App（Android） | Capacitor 8（`android/`），复用同一份 `dist/` | ✅ 原生工程已生成，状态栏/键盘/返回键/安全区/分享导出已接 |
+| App（iOS） | Capacitor 8（`ios/`） | 🟡 工程与权限声明已生成；需 macOS + Xcode 编译验证 |
 
-> 也就是说：**代码是一套**（业务、协议、UI 全在 `src/`，三端共享），但**交付验证过的只有 Web + PWA**；
-> PC/移动原生壳是预留接口，未构建、未联调。壳层差异（QUIC/WebTransport、原生推送、后台保活、音频会话、权限）见下文。
-
-## 技术栈
-
-| 层 | 选型 | 说明 |
-|---|---|---|
-| 框架 | **React 19 + TypeScript 7** | 严格模式（`strict` + 未使用变量报错） |
-| 样式 | **Tailwind CSS v4** | `@tailwindcss/vite`，无 `tailwind.config.js` |
-| 构建 | **Vite 8** | 产物 `dist/`，gzip 后 JS ≈ 83 KB |
-| Web | 直接部署 `dist/` | 静态托管 + `/v1`、`/ws`、`/rtc` 反向代理 |
-| PC | **Tauri 2**（或 Electron） | `src-tauri/`，复用同一份 `dist/`（脚手架，未构建） |
-| App | **PWA**（已内置 manifest + service worker）/ Capacitor（可选） | `public/manifest.webmanifest`、`capacitor.config.ts`（脚手架，未构建） |
-| 传输 | WS（默认）/ QUIC 协商层 | `src/sdk/transport.ts`：解析 `transports`、灰度、200ms 回退；Web 只能 WS |
-
-## 目录
+## 三端架构
 
 ```
-zim-web/
-├── src/
-│   ├── sdk/                 # 与 UI 无关的 IM SDK（可被 CLI/壳复用）
-│   │   ├── types.ts         # 线协议类型（snake_case，int64 = string）
-│   │   ├── proto.ts         # protobuf 编解码（int64 → BigInt）
-│   │   ├── messages.ts      # opcode + 各消息编解码
-│   │   ├── frame.ts         # [len4][ver1][op2][seq4] 帧
-│   │   ├── client.ts        # WS 传输：seq 关联 / 推送 / 重连 / 踢下线
-│   │   ├── rest.ts          # REST /v1（统一解包 {code,data,message}）
-│   │   └── history.ts       # 历史消息窗口扫描（前向游标）
-│   ├── app/
-│   │   ├── store.ts         # 连接 + REST + UI 状态（useSyncExternalStore）
-│   │   └── format.ts        # 时间/预览/头像/角色格式化
-│   ├── components/          # LoginView / Workspace / ChatPanel / MembersDialog …
-│   ├── App.tsx
-│   └── main.tsx
-├── public/                  # PWA 清单、图标、service worker
-├── src-tauri/               # Tauri 2 桌面壳
-├── capacitor.config.ts      # Capacitor 移动壳（可选）
-└── e2e/ui.mjs               # 双标签页 alice/bob 真实联调 + 截图
+src/
+├── sdk/                 # 与 UI/壳无关的 IM SDK（WS/WebTransport、protobuf、REST、历史、通话信令）
+├── app/                 # 连接、REST、UI 状态（store / call / format）
+├── components/          # 一套响应式界面（桌面 Rail+Sidebar+Chat，手机 BottomTab+Chat）
+└── platform/            # 唯一允许接触原生壳的目录
+    ├── detect.ts        # web | pwa | tauri | android | ios + capabilities
+    ├── http.ts          # PC 走 Tauri plugin-http，App 走 CapacitorHttp，Web 走 fetch
+    ├── notifications.ts # 浏览器 / Tauri / Capacitor 本地通知
+    ├── files.ts         # 浏览器下载 / 原生保存对话框 / 系统分享
+    ├── chrome.ts        # 状态栏、键盘主题、Android 返回键、启动屏、触感
+    ├── pwa.ts           # beforeinstallprompt
+    └── runtime.ts       # 启动引导（main.tsx 在首帧前 await）
 ```
+
+- **业务/UI 只写一份**：新功能默认三端同时获得。
+- **壳能力先抽象**：在 `src/platform/` 增加能力，再在 Tauri/Capacitor 两侧补齐实现与权限。
+- **布局只用断点与安全区**：`md:` 断点 + `--safe-*` CSS 变量，不用 UA 判断布局。
 
 ## 开发
 
 ```bash
 npm install
-npm run dev        # http://127.0.0.1:5280  （5173 落在本机保留端口段，故用 5280）
+npm run dev        # https://127.0.0.1:5280（ZIM_HTTPS=1 时启用 TLS）
 ```
 
-开发代理（`vite.config.ts`）把 `/v1` 转发到 `http://127.0.0.1:8080`、`/ws` 转发到 `ws://127.0.0.1:3553`，因此浏览器同源，**zim-api 不需要 CORS**。可用环境变量覆盖：
+开发代理（`vite.config.ts`）把 `/v1` 转发到 `http://127.0.0.1:8080`、`/ws` 转到 `ws://127.0.0.1:3553`、`/rtc` 转到 LiveKit，浏览器保持同源。可用环境变量覆盖：
 
 ```bash
 ZIM_API=http://10.0.0.5:8080 ZIM_WS=ws://10.0.0.5:3553 npm run dev
 ```
 
+PC/App 原生壳从本地加载页面，需要一个**同时提供 `/v1` 与 `/ws` 的单一来源**。本地联调时另开一个 HTTP 网关（不带 TLS，避免自签证书问题）：
+
+```bash
+npm run dev:gateway     # http://127.0.0.1:5290，代理 /v1 /ws /rtc
+```
+
+然后在 PC/App 的「接入地址」里填 `http://127.0.0.1:5290`（真机用电脑的局域网 IP）。生产环境填网关的 `https://` 地址。
+
 ## 构建与校验
 
 ```bash
-npm run typecheck   # tsc --noEmit
-npm run build       # tsc + vite build → dist/
-npm run preview     # 预览产物（:4173）
-npm run e2e         # 需要 dev server 与后端栈在跑
+npm run typecheck        # tsc --noEmit
+npm run build            # tsc + vite build → dist/
+npm run check:platforms  # 三端契约静态检查（边界/权限/版本/PWA/原生工程）
+npm run check            # typecheck + build + check:platforms
+npm run e2e              # 双账号真实消息链路（需要 dev server + 后端栈）
+npm run e2e:platforms    # 桌面/手机布局断言 + 截图（_output/screens/platforms）
+npm run e2e:friends      # 好友申请同意/拒绝回归（含刷新失败场景）
+npm run e2e:transport    # 传输协商、WebTransport 适配器、WS 回退
 ```
 
-`npm run e2e` 用 `puppeteer-core` 拉起无头 Chrome，两个标签页分别登录 alice / bob，验证：登录 → 打开会话 → 发消息 → 对端 **1901 实时到达** → 回复落地为 `sent` → 群线程可打开 → PWA manifest 可读。截图输出到 `_output/screens/`。
-
-> 群成员弹窗（`GET /v1/groups/{gid}/members` + `GET /v1/users?uids=`）当前未纳入自动化断言，只做了手工验证。
-
-## 三端打包
-
-### PC（Tauri 2）
-
-> 状态：**脚手架**（`src-tauri/` 有 `Cargo.toml`/`tauri.conf.json`/图标，但没有 `Cargo.lock`/`target/`，即从未构建）。
-> 本机也没有 Rust 工具链与 `@tauri-apps/cli`。
+## PC（Tauri 2）
 
 ```bash
-# 首次需要 Rust 工具链 + 平台依赖：https://tauri.app/start/prerequisites/
-npm install -D @tauri-apps/cli
-npx tauri dev      # 开发态（内嵌 devUrl）
-npx tauri build    # 产出 Windows .msi/.exe、macOS .app/.dmg
+npm run build:pc     # = tauri build，产物在 src-tauri/target/release/bundle/
+npm run dev:pc       # = tauri dev，自动拉起 Vite
 ```
 
-`src-tauri/tauri.conf.json` 已把 `devUrl` 指向 `http://127.0.0.1:5280`、`frontendDist` 指向 `../dist`。
+已接入的桌面能力：
 
-> 桌面壳里页面不在 `http://127.0.0.1:5280`，所以登录页的「接入地址」必须填服务端地址（如 `https://im.example.com`）。
-> 跨域请求在壳内仍受 WebView 的 CORS 约束：生产建议网关同域，或改用 `tauri-plugin-http` 走 Rust 侧请求。
+- 关闭窗口收进**托盘**，WebSocket 保持在线；托盘左键恢复，菜单可退出；
+- **单实例**：重复启动只聚焦已有窗口，避免同账号双连接互踢；
+- **窗口状态**恢复（大小/位置/最大化）；
+- **系统通知**（Tauri notification plugin）；
+- **原生 HTTP**（plugin-http）绕过 WebView CORS，登录页填写 `https://` 服务器地址即可；
+- **导出聊天记录**使用原生保存对话框 + 文件系统写入；
+- 聊天中的链接交给系统浏览器打开。
 
-### App（PWA，推荐先走这条）
+> 安装包：`src-tauri/target/release/bundle/msi/ZIM_0.1.0_x64_en-US.msi`、
+> `src-tauri/target/release/bundle/nsis/ZIM_0.1.0_x64-setup.exe`（本机构建产物，不提交仓库）。
 
-`npm run build` 后由 HTTPS 静态站点托管即可安装到主屏。已包含：
+## App（PWA / Capacitor）
 
-- `manifest.webmanifest`（standalone、图标、主题色）
-- `sw.js`：仅缓存应用壳，**不缓存 `/v1` 与 `/ws`**
-- 生产构建时在 `main.tsx` 注册
+### PWA
 
-### App（Capacitor，需要原生能力时）
+`npm run build` 后由 HTTPS 站点托管即可安装到主屏。已包含：
 
-> 状态：**脚手架**（只有 `capacitor.config.ts`，未安装 `@capacitor/*`，也没有 `android/`、`ios/` 工程）。
-> 原生推送、后台保活、音频会话需要在这一步接。
+- `manifest.webmanifest`（standalone、图标、主题色、快捷方式）
+- `sw.js`：仅缓存应用壳，**不缓存 `/v1` 与 `/ws`**，导航网络优先、离线回退
+- 生产构建时由 `main.tsx` 注册；原生壳内自动跳过
+
+### Android（Capacitor）
 
 ```bash
-npm install -D @capacitor/cli && npm install @capacitor/core @capacitor/android @capacitor/ios
-npx cap add android && npx cap add ios
-npm run build && npx cap sync
-npx cap open android
+npm run build:android    # build + cap sync + gradlew assembleDebug
+# 产物：android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`capacitor.config.ts` 的 `webDir` 已指向 `dist`。原生推送（APNs/FCM）与后台接收仍需厂商通道配置——这部分对应 `ZIM` 的离线推送链路。
+首次构建需要：
+
+- JDK 21（`JAVA_HOME`）
+- Android SDK 36（`ANDROID_HOME`，含 `platforms;android-36`、`build-tools;36.0.0`、`platform-tools`）
+
+已接入：状态栏/键盘跟随主题、Android 返回键分级处理（关弹窗 → 退会话 → 回会话列表 → 退出）、安全区适配、本地通知、系统分享导出、Haptics 轻触反馈、`CapacitorHttp` 原生网络。`android/app/src/debug/AndroidManifest.xml` 仅在 debug 构建放开明文 HTTP，release 保持 HTTPS-only。
+
+### iOS（Capacitor）
+
+```bash
+npm run build:ios        # build + cap sync ios
+open ios/App/App.xcodeproj     # 需 macOS + Xcode
+```
+
+`Info.plist` 已声明摄像头、麦克风、相册权限、后台音频与 `ITSAppUsesNonExemptEncryption=false`。Windows 上只能同步工程，不能编译 iOS。
 
 ## 功能状态（2026-11）
 
 已实现并验证：
 
 - **消息**：单聊/群聊文本、图片、文件、语音、视频附件上传（预签名 PUT）、引用回复、转发/合并转发、撤回/编辑、reaction、会话内搜索、全局搜索、@ 提醒、未读/已读回执、草稿、多选转发、长文折叠、链接识别。
-- **好友/群**：好友申请与审批、备注、黑名单、群创建/改名/公告/成员角色/禁言、群事件 1904 实时刷新、入群申请。
-- **通话**：
-  - 1v1 语音/视频：振铃、接听、拒绝、取消、多端抢接（phase=4）、扬声器/静音/摄像头开关；
-  - 普通群：常驻房间（`target_type=2`），无振铃，横幅/卡片一键加入，`1803` 退出、最后一人结束；
-  - 家庭组：振铃/自动接听保留（`target_type=3`），支持随时加入/退出与 `1805` 房间状态；
-  - 通话前申请麦克风/摄像头权限，摄像头不可用自动降级语音；30s 心跳；页面卸载 best-effort `1803`。
-- **协议/可靠性**：`1801` 即入房（invite token）、`1802 phase=2` token 进房、1805 对账（重连/回前台）、房间花名册看门狗（SFU 信令僵死自愈）、`180009` 换 token 重连。
-- **传输协商**：读取 `transports`、按设备灰度、200ms WebTransport 探测回退；Web 端当前固定 WS（原因见 ADR）。
+- **好友/群**：好友申请与审批（同意/拒绝后立即从收件箱移除，刷新失败也不会留下无法操作的行）、备注、黑名单、群创建/改名/公告/成员角色/禁言、群事件 1904 实时刷新、入群申请。
+- **通话**：1v1 与群/家庭房间的振铃、接听、拒绝、取消、多端抢接、常驻房间、权限预检、摄像头不可用降级语音、30s 心跳、`1801/1802/1803/1805/180009` 全链路。
+- **协议/可靠性**：1805 对账、房间花名册看门狗、`transports` 协商与 200ms WebTransport 回退、断线重连与增量同步。
+- **传输**：登录后从 `/v1/ws/ticket` 读取 `ws` / `quic` / `webtransport`。浏览器/WebView 走 WebTransport（HTTP/3+一条双向流）；PC（Tauri/quinn）和 Android（Capacitor/Kwik）在服务端下发 `quicAddr` 时优先直连**裸 QUIC**（ALPN `due-quic`），失败按 `quic → webtransport → ws` 回退；断线重连会重新领取一次性 ticket（裸 QUIC 用 token 认证，不消耗 ticket）。
+- **三端框架**：响应式双形态界面、安全区、Android 返回键、PWA 安装、桌面托盘、原生通知、原生 HTTP、原生保存/分享、平台信息面板。
 
 ## 与 ZIM 后端的契约
 
@@ -150,10 +150,23 @@ npx cap open android
 
 ## 已知限制
 
-- 历史分页只能前向（`begin_seq/end_seq/limit` 无 `desc`），尾部与"更早"都用窗口扫描，见 `src/sdk/history.ts`。
-- 客户端 WS 仍以 `token=` 直连；服务端 `/v1/ws/ticket` 已存在但客户端未改用它。
-- **PC/移动原生壳未构建**：Tauri 需要 Rust 工具链与 `@tauri-apps/cli`；Capacitor 需要安装 `@capacitor/*` 并生成 `android/`、`ios/` 工程。当前没有安装包。
-- **原生平台能力待接**：APNs/FCM 离线推送与角标、后台保活、iOS `AVAudioSession`/Android 音频焦点、原生权限弹窗。
-- **QUIC**：gate 的 QUIC 是 due 自定义协议（ALPN `due-quic`，非 HTTP/3），浏览器无法直连；Web 端要等 WebTransport 网关（HTTP/3 + CONNECT）与 `transports` 下发。
+- **iOS**：工程已生成并同步，但未在 macOS 上编译、未做真机推送/通话验证。
+- **原生推送**：APNs/FCM 离线推送与角标尚未接入（需要厂商证书/通道配置）；当前使用本地通知 + 前端在线推送。
+- **PC 通话**：WebView2 的 WebRTC 需要 `wss` SFU；生产环境必须为 HTTPS/WSS，开发机上可改用 Web 端验证通话。
+- **PC/App 首次登录**：必须填写同时代理 `/v1` 与 `/ws` 的服务器地址；只填 API 端口会出现「ws 握手失败」。
+- **历史分页**只能前向（`begin_seq/end_seq/limit` 无 `desc`），尾部与"更早"都用窗口扫描，见 `src/sdk/history.ts`。
+- **QUIC**：Web/PWA 走 **WebTransport**（HTTP/3+CONNECT）；PC 用 Tauri/quinn、Android 用 Capacitor/Kwik 直连**裸 QUIC**（ALPN `due-quic`），iOS 原生裸 QUIC 尚未接入（自动回退 WebTransport/WS）。裸 QUIC 需要服务端以 `transport=quic` 部署并在 `/v1/ws/ticket` 下发 `quicAddr`，且 UDP 端口放通、证书受信任。详见 [docs/native-quic.md](docs/native-quic.md)。
 - **TURN over TLS(443) 未部署**：对称 NAT/4G 下仍可能"接通但无声"。
 - 服务端在 gate/push 重启后可能出现推送路由缓存失效（`not found endpoint`）：重启 `zim-push` 可恢复；`zim-node-msg` 残留绑定会让账号被反复踢下线（`closed 1006`），重启该容器可恢复。
+
+## 通话提示“没有麦克风”的排查
+
+权限预检（`src/app/media-devices.ts`）会先用浏览器默认设备，失败后再逐个枚举 `audioinput` 重试，因此“Windows 里耳机能说话、浏览器却说没有麦克风”分两种情况：
+
+1. **浏览器能枚举到麦克风，但默认设备是失效的旧 deviceId**（USB 耳机换过口/重新插拔最常见）。预检会自动切到可用的输入，并用同一个 `deviceId` 让 LiveKit 发布该麦克风，Toast 提示“已切换可用的麦克风：<设备名>”。
+2. **浏览器一个 `audioinput` 都枚举不到**。此时不是应用能修复的问题：
+   - 远程桌面（RDP）会话默认不把本机麦克风带进会话，`mstsc` → 选项 → 本地资源 → 远程音频 → 设置 → 勾选“从这台计算机录制”后重连；服务器侧还需 `fDisableAudioCapture=0`（本仓库验证机为 0）。
+   - 本机使用时检查 Windows 设置 → 隐私和安全性 → 麦克风 → “让桌面应用访问你的麦克风”。
+   - Chrome 的麦克风权限被拒会单独提示，用地址栏站点设置放开即可。
+
+可在浏览器控制台执行 `navigator.mediaDevices.enumerateDevices()` 自检：`audioinput` 为空就是第 2 种情况。

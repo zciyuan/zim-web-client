@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">ZIM</string>
+    <string name="title_activity_main">ZIM</string>
+    <string name="package_name">com.zim.im</string>
+    <string name="custom_url_scheme">com.zim.im</string>
+</resources>

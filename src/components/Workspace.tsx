@@ -2,10 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { Avatar } from './Avatar';
 import { ChatPanel } from './ChatPanel';
+import { MobileTabBar } from './MobileTabBar';
 import { ProfileDialog } from './ProfileDialog';
 import { AddFriendDialog } from './AddFriendDialog';
 import { GroupDialogs } from './GroupDialogs';
 import { imStore, useIm, type Tab } from '../app/store';
+import { useInstallPrompt } from '../platform';
 import { atOf, formatClock, formatListTime, mentionsInBrief, mentionsInUnread, messagePreview, messageText, previewConversation } from '../app/format';
 
 type ConversationRow = ReturnType<typeof imStore.getSnapshot>['conversations'][number];
@@ -46,34 +48,23 @@ const CONNECTION_COLOR: Record<string, string> = {
   error: 'bg-rose-500',
 };
 
-function Rail() {
+function Rail({ onProfile }: { onProfile: () => void }) {
   const state = useIm();
-  const [profileOpen, setProfileOpen] = useState(false);
   const total = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
   const pending = state.friendRequests.length;
   const dot = CONNECTION_COLOR[state.connection] ?? 'bg-slate-400';
-  const [installEvent, setInstallEvent] = useState<{ prompt: () => Promise<void> } | null>(null);
-
-  useEffect(() => {
-    const onPrompt = (event: Event) => {
-      event.preventDefault();
-      setInstallEvent(event as unknown as { prompt: () => Promise<void> });
-    };
-    window.addEventListener('beforeinstallprompt', onPrompt);
-    return () => window.removeEventListener('beforeinstallprompt', onPrompt);
-  }, []);
+  const install = useInstallPrompt();
 
   return (
-    <aside className="flex w-[76px] shrink-0 flex-col items-center gap-2 border-r border-slate-200 bg-slate-50 px-2 py-3.5 dark:border-slate-800 dark:bg-slate-900">
+    <aside className="hidden w-[76px] shrink-0 flex-col items-center gap-2 border-r border-slate-200 bg-slate-50 px-2 py-3.5 md:flex dark:border-slate-800 dark:bg-slate-900">
       <button
         type="button"
         aria-label="个人资料"
-        onClick={() => setProfileOpen(true)}
+        onClick={onProfile}
         className="mb-1.5 grid h-10 w-10 place-items-center rounded-xl bg-linear-to-br from-indigo-500 to-violet-500 font-bold text-white"
       >
         {String(state.me?.name ?? 'Z').slice(0, 1).toUpperCase()}
       </button>
-      <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />
 
       <nav className="flex w-full flex-col gap-1" aria-label="主导航">
         {TABS.map((tab) => {
@@ -148,15 +139,12 @@ function Rail() {
         >
           {state.notifications ? '🔔' : '🔕'}
         </button>
-        {installEvent ? (
+        {install.available ? (
           <button
             type="button"
             aria-label="安装应用"
             data-install-app
-            onClick={() => {
-              void installEvent.prompt();
-              setInstallEvent(null);
-            }}
+            onClick={() => void install.install()}
             className="rounded-lg border border-indigo-300 px-2 py-1 text-xs text-indigo-600 transition hover:border-indigo-500 dark:border-indigo-800 dark:text-indigo-300"
           >
             安装
@@ -827,16 +815,26 @@ function Sidebar() {
                   const profile = state.requestProfiles[from];
                   const name = profile?.nickname || profile?.username || `用户 ${from}`;
                   return (
-                    <div key={String(request.id ?? from)} className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                    <div key={String(request.id ?? from)} data-friend-request={from} className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-slate-50 dark:hover:bg-slate-800/60">
                       <Avatar name={name} seed={from} size={28} />
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-[13px]">{name}</span>
                         <span className="block truncate text-[11px] text-slate-400">{request.why || '请求添加你为好友'}</span>
                       </span>
-                      <button type="button" className="rounded border border-emerald-200 px-1.5 py-0.5 text-[11px] text-emerald-700 dark:border-emerald-900" onClick={() => void imStore.answerFriend(from, true)}>
+                      <button
+                        type="button"
+                        data-friend-answer="accept"
+                        className="rounded border border-emerald-200 px-1.5 py-0.5 text-[11px] text-emerald-700 dark:border-emerald-900"
+                        onClick={() => void imStore.answerFriend(from, true).catch(() => undefined)}
+                      >
                         同意
                       </button>
-                      <button type="button" className="rounded border border-slate-200 px-1.5 py-0.5 text-[11px] dark:border-slate-700" onClick={() => void imStore.answerFriend(from, false)}>
+                      <button
+                        type="button"
+                        data-friend-answer="reject"
+                        className="rounded border border-slate-200 px-1.5 py-0.5 text-[11px] dark:border-slate-700"
+                        onClick={() => void imStore.answerFriend(from, false).catch(() => undefined)}
+                      >
                         拒绝
                       </button>
                     </div>
@@ -941,6 +939,7 @@ function Sidebar() {
 
 export function Workspace() {
   const state = useIm();
+  const [profileOpen, setProfileOpen] = useState(false);
   const unread = state.conversations.reduce((sum, item) => sum + Number(item.unread ?? 0), 0);
 
   // Keep the tab title in sync with the unread total (classic IM affordance).
@@ -963,7 +962,7 @@ export function Workspace() {
   const reconnecting = state.connection === 'connecting' || state.connection === 'reconnecting';
 
   return (
-    <div className="flex h-full flex-col bg-slate-100 dark:bg-slate-950">
+    <div className="zim-shell flex h-full flex-col bg-slate-100 dark:bg-slate-950">
       {state.kickedLoop ? (
         <div data-connection-banner="kicked" className="flex items-center justify-center gap-2 bg-rose-500 px-3 py-1 text-xs text-white">
           <span>账号在别处登录，已停止重连</span>
@@ -999,10 +998,12 @@ export function Workspace() {
         </div>
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <Rail />
+        <Rail onProfile={() => setProfileOpen(true)} />
         <Sidebar />
         <ChatPanel />
       </div>
+      {state.activeCid ? null : <MobileTabBar onProfile={() => setProfileOpen(true)} />}
+      <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />
     </div>
   );
 }

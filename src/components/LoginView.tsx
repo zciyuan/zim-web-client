@@ -2,6 +2,7 @@ import { useMemo, useState, type FormEvent } from 'react';
 
 import { imStore, useIm } from '../app/store';
 import { loadLoginPrefs } from '../app/loginPrefs';
+import { usePlatform } from '../platform';
 
 type Mode = 'login' | 'register';
 
@@ -15,6 +16,7 @@ type Mode = 'login' | 'register';
  */
 export function LoginView() {
   const state = useIm();
+  const platform = usePlatform();
   const saved = useMemo(() => loadLoginPrefs(), []);
   const [mode, setMode] = useState<Mode>('login');
   const [username, setUsername] = useState(saved.username);
@@ -46,7 +48,7 @@ export function LoginView() {
 
   if (state.status === 'restoring') {
     return (
-      <div className="grid min-h-full place-items-center bg-slate-50 dark:bg-slate-950">
+      <div className="zim-shell grid min-h-full place-items-center bg-slate-50 dark:bg-slate-950">
         <p className="text-sm text-slate-500">正在恢复会话…</p>
       </div>
     );
@@ -54,17 +56,23 @@ export function LoginView() {
 
   const isRegister = mode === 'register';
   const recent = saved.recent.filter((item) => item !== username);
+  const needsEndpoint = platform.native;
+  const title = platform.desktop ? 'ZIM 桌面端' : platform.mobile ? 'ZIM App' : 'ZIM Web 客户端';
 
   return (
-    <div className="grid min-h-full place-items-center bg-slate-50 px-4 py-10 dark:bg-slate-950">
+    <div className="zim-shell grid min-h-full place-items-center bg-slate-50 px-4 py-8 pb-[calc(2rem+var(--safe-bottom))] dark:bg-slate-950">
       <div className="w-full max-w-[420px] rounded-3xl border border-slate-200 bg-white p-7 shadow-xl shadow-slate-900/5 dark:border-slate-800 dark:bg-slate-900">
         <div className="mb-5 flex items-center gap-3">
           <div className="grid h-12 w-12 place-items-center rounded-2xl bg-linear-to-br from-indigo-500 to-violet-500 font-bold tracking-wide text-white">
             ZIM
           </div>
-          <div>
-            <h1 className="text-lg font-semibold text-slate-900 dark:text-slate-50">ZIM Web 客户端</h1>
-            <p className="text-xs text-slate-500">React + TypeScript · Web / PC / App 同一套代码</p>
+          <div className="min-w-0">
+            <h1 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-50">{title}</h1>
+            <p className="flex items-center gap-1.5 text-xs text-slate-500">
+              <span data-platform-label>{platform.label}</span>
+              <span aria-hidden>·</span>
+              <span>v{platform.version}</span>
+            </p>
           </div>
         </div>
 
@@ -135,7 +143,9 @@ export function LoginView() {
             />
             {!isRegister ? (
               <span className="mt-1 block text-[11px] text-slate-400">
-                密码不保存在本站，由浏览器密码管理器（Chrome / Edge / Safari）在登录成功后提示保存。
+                {platform.native
+                  ? '密码仅用于本次登录，不会保存在设备上。'
+                  : '密码不保存在本站，由浏览器密码管理器（Chrome / Edge / Safari）在登录成功后提示保存。'}
               </span>
             ) : null}
           </label>
@@ -155,16 +165,26 @@ export function LoginView() {
           ) : null}
 
           <label className="block">
-            <span className="mb-1 block text-xs text-slate-500">接入地址</span>
+            <span className="mb-1 block text-xs text-slate-500">
+              接入地址{needsEndpoint ? <span className="text-rose-500">（必填）</span> : null}
+            </span>
             <input
               name="endpoint"
               value={endpoint}
               onChange={(event) => setEndpoint(event.target.value)}
-              placeholder="留空 = 同源（Web/PWA 推荐）"
+              type="text"
+              inputMode="url"
+              autoComplete="url"
+              autoCapitalize="none"
+              spellCheck={false}
+              required={needsEndpoint}
+              placeholder={needsEndpoint ? 'https://im.example.com' : '留空 = 同源（Web/PWA 推荐）'}
               className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm outline-none transition focus:border-indigo-400 focus:ring-3 focus:ring-indigo-100 dark:border-slate-700 dark:bg-slate-800 dark:focus:ring-indigo-900/40"
             />
-            <span className="mt-1 block text-[11px] text-slate-400">
-              桌面端（Tauri）与 App（Capacitor）填服务器地址，例如 https://im.example.com
+            <span className="mt-1 block text-[11px] text-slate-400" data-endpoint-required={needsEndpoint ? 'true' : 'false'}>
+              {needsEndpoint
+                ? `${platform.desktop ? '桌面端' : 'App'}从本地加载页面，必须填写服务器地址：该地址需同时代理 /v1 与 /ws（生产环境请使用 https://）`
+                : 'Web 端留空即使用当前站点反向代理（/v1、/ws），无需填写'}
             </span>
           </label>
 
